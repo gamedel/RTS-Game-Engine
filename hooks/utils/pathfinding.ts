@@ -1,4 +1,5 @@
-import * as PF from 'pathfinding';
+import React from 'react';
+import EasyStar from 'easystarjs';
 import { Building, ResourceNode, Vector3, Action, UnitStatus } from '../../types';
 import { COLLISION_DATA } from '../../constants';
 
@@ -12,6 +13,13 @@ const MAX_UNIT_RADIUS = Math.max(
     ...Object.values(COLLISION_DATA.UNITS).map((u: any) => u.radius)
 );
 const BUILDING_PADDING = MAX_UNIT_RADIUS + 0.5;
+
+// --- External Pathfinder ---
+const easystar = new EasyStar.js();
+easystar.setAcceptableTiles([0]);
+easystar.enableDiagonals();
+easystar.disableCornerCutting();
+easystar.setIterationsPerCalculation(1000);
 
 // --- Helper Functions ---
 const toGridCoords = (pos: Vector3) => ({
@@ -69,87 +77,9 @@ const createGrid = (buildings: Record<string, Building>, resourcesNodes: Record<
     return grid;
 };
 
-// This function is no longer used but kept for potential future use with different pathfinders.
-const simplifyPath = (path: Vector3[]): Vector3[] => {
-    if (path.length < 3) return path;
-    const newPath: Vector3[] = [path[0]];
-    for (let i = 1; i < path.length - 1; i++) {
-        const p1 = newPath[newPath.length - 1];
-        const p2 = path[i];
-        const p3 = path[i + 1];
-        
-        const dx1 = p2.x - p1.x;
-        const dz1 = p2.z - p1.z;
-        const dx2 = p3.x - p2.x;
-        const dz2 = p3.z - p2.z;
-
-        if (Math.abs(dx1 * dz2 - dx2 * dz1) > 0.01) {
-            newPath.push(p2);
-        }
-    }
-    newPath.push(path[path.length - 1]);
-    return newPath;
-};
-
-function findPath(startPos: Vector3, endPos: Vector3, grid: number[][]): Vector3[] | null {
-    const start = toGridCoords(startPos);
-    let end = toGridCoords(endPos);
-    const H = grid.length, W = grid[0]?.length || 0;
-
-    if (start.x < 0 || start.x >= W || start.y < 0 || start.y >= H) {
-        start.x = Math.max(0, Math.min(W - 1, start.x));
-        start.y = Math.max(0, Math.min(H - 1, start.y));
-    }
-    if (end.x < 0 || end.x >= W || end.y < 0 || end.y >= H) {
-        end.x = Math.max(0, Math.min(W - 1, end.x));
-        end.y = Math.max(0, Math.min(H - 1, end.y));
-    }
-
-    if (grid[start.y]?.[start.x] === 1) {
-        // Start point is on an obstacle, can't path
-        return null;
-    }
-
-    if (grid[end.y]?.[end.x] === 1) {
-        // End point is on an obstacle, find a nearby walkable tile.
-        let best = null;
-        let bestDist = Infinity;
-        const searchRadius = 20; // Search up to 10 world units away (20 grid cells)
-        for (let r = 1; r < searchRadius && !best; r++) {
-            for (let dy = -r; dy <= r; dy++) {
-                for (let dx = -r; dx <= r; dx++) {
-                    if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
-                    const nx = end.x + dx, ny = end.y + dy;
-                    if (ny >= 0 && ny < H && nx >= 0 && nx < W && grid[ny][nx] === 0) {
-                        const d = Math.hypot(dx, dy);
-                        if (d < bestDist) {
-                            bestDist = d;
-                            best = { x: nx, y: ny };
-                        }
-                    }
-                }
-            }
-        }
-        if (best) {
-            end = best;
-        } else {
-            // No walkable tile found near destination
-            return null;
-        }
-    }
-
-    const pfGrid = new PF.Grid(grid);
-    const finder = (PF.JumpPointFinder as any)({
-        diagonalMovement: PF.DiagonalMovement.OnlyWhenNoObstacles,
-    });
-    const rawPath = finder.findPath(start.x, start.y, end.x, end.y, pfGrid);
-
-    if (!rawPath || rawPath.length === 0) return null;
-
-    const worldPath = rawPath.map(([x, y]) => fromGridCoords({ x, y }));
-    // FIX: Path simplification is disabled. This provides a more detailed path
-    // that prevents units from cutting corners and clipping through buildings.
-    return worldPath;
+function clampToGrid(node: { x: number; y: number }, W: number, H: number) {
+    if (node.x < 0 || node.x >= W) node.x = Math.max(0, Math.min(W - 1, node.x));
+    if (node.y < 0 || node.y >= H) node.y = Math.max(0, Math.min(H - 1, node.y));
 }
 
 // --- Manager Implementation ---
@@ -171,6 +101,7 @@ export const PathfindingManager = {
 
     setGrid: (buildings: Record<string, Building>, resourcesNodes: Record<string, ResourceNode>) => {
         pathfindingGrid = createGrid(buildings, resourcesNodes);
+        easystar.setGrid(pathfindingGrid);
     },
 
     requestPath: (unitId: string, startPos: Vector3, endPos: Vector3) => {
@@ -185,30 +116,35 @@ export const PathfindingManager = {
     
     // This will be called on each game tick to process a part of the queue
     processQueue: () => {
-        if (requestQueue.length === 0 || !pathfindingGrid || !dispatchRef) return;
-        
-        // Process one request per frame to distribute the load
+        if (!pathfindingGrid || !dispatchRef) return;
+
+        // Kick off one request per frame and process existing ones
         const request = requestQueue.shift();
-        if (!request) return;
+        if (request) {
+            const { unitId, startPos, endPos } = request;
+            const H = pathfindingGrid.length, W = pathfindingGrid[0]?.length || 0;
+            const start = toGridCoords(startPos);
+            const end = toGridCoords(endPos);
+            clampToGrid(start, W, H);
+            clampToGrid(end, W, H);
 
-        const { unitId, startPos, endPos } = request;
-
-        try {
-            const path = findPath(startPos, endPos, pathfindingGrid);
-
-            if (path && path.length > 0) {
-                dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path, pathIndex: 0, targetPosition: path[0] } });
-            } else {
+            if (pathfindingGrid[start.y]?.[start.x] === 1) {
+                pendingRequests.delete(unitId);
                 dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
+            } else {
+                easystar.findPath(start.x, start.y, end.x, end.y, rawPath => {
+                    pendingRequests.delete(unitId);
+                    if (rawPath && rawPath.length > 0) {
+                        const worldPath = rawPath.map(({ x, y }) => fromGridCoords({ x, y }));
+                        dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path: worldPath, pathIndex: 0, targetPosition: worldPath[0] } });
+                    } else {
+                        dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
+                    }
+                });
             }
-        } catch (error) {
-            console.error("Pathfinding error for unit:", unitId, error);
-            // Ensure the unit doesn't get stuck waiting for a path
-            dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
-        } finally {
-            // Remove from pending regardless of outcome
-            pendingRequests.delete(unitId);
         }
+
+        easystar.calculate();
     },
 
     terminate: () => {

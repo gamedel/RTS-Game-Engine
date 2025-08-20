@@ -9,15 +9,16 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@react-three/drei": "^10.6.1",
+    "@react-three/fiber": "^9.3.0",
+    "easystarjs": "^0.4.4",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "uuid": "^11.1.0",
     "three": "^0.179.1",
-    "@react-three/fiber": "^9.3.0",
-    "@react-three/drei": "^10.6.1",
-    "pathfinding": "^0.4.18"
+    "uuid": "^11.1.0"
   },
   "devDependencies": {
+    "@types/easystarjs": "^0.1.29",
     "@types/node": "^22.14.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
