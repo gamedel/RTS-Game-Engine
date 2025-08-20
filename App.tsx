@@ -1,0 +1,126 @@
+import React, { useReducer, useMemo, useState, useRef } from 'react';
+import { Canvas } from '@react-three/fiber';
+import { GameState, GameObject, AIDifficulty, MapType, Vector3, PlayerSetupConfig } from './types';
+import { createInitialGameState } from './constants';
+import { UI } from './components/UI';
+import { GameScene } from './components/GameScene';
+import { gameReducer } from './state/reducer';
+import { LocalizationProvider, useLocalization } from './hooks/useLocalization';
+import { MainMenu } from './components/ui/MainMenu';
+import { PauseMenu } from './components/ui/PauseMenu';
+import * as THREE from 'three';
+
+const GameStatusOverlay: React.FC<{ status: GameState['gameStatus'], onBackToMenu: () => void }> = ({ status, onBackToMenu }) => {
+    const { t } = useLocalization();
+    if (status !== 'won' && status !== 'lost') return null;
+
+    const message = status === 'won' ? t('ui.youWin') : t('ui.youLose');
+    const messageColor = status === 'won' ? 'text-green-400' : 'text-red-400';
+
+    return (
+        <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center z-50">
+            <h1 className={`text-7xl font-bold ${messageColor} mb-8`}>{message}</h1>
+            <button
+                onClick={onBackToMenu}
+                className="px-8 py-4 bg-slate-700 hover:bg-slate-600 text-white font-bold text-2xl rounded-lg ring-2 ring-slate-500 transition-transform transform hover:scale-105"
+            >
+                {t('ui.backToMenu')}
+            </button>
+        </div>
+    );
+};
+
+export type CameraControlsRef = {
+  setTarget: (target: Vector3) => void;
+};
+
+const defaultPlayers: PlayerSetupConfig[] = [
+    { isHuman: true, teamId: '1' },
+    { isHuman: false, teamId: '2', difficulty: 'normal' }
+];
+
+function AppContent() {
+  const [gameState, dispatch] = useReducer(gameReducer, createInitialGameState('default', defaultPlayers));
+  const [selectionBox, setSelectionBox] = useState<{ start: { x: number, y: number }, end: { x: number, y: number } } | null>(null);
+  const [isSelecting, setIsSelecting] = useState(false);
+  const [fps, setFps] = useState(0);
+  const [gamePhase, setGamePhase] = useState<'menu' | 'playing'>('menu');
+  const [camera, setCamera] = useState<THREE.Camera | null>(null);
+  const cameraControlsRef = useRef<CameraControlsRef>(null);
+
+  const selectedObjects = useMemo(() => {
+    const allObjects = { ...gameState.units, ...gameState.buildings, ...gameState.resourcesNodes };
+    return gameState.selectedIds.map(id => allObjects[id]).filter(Boolean) as GameObject[];
+  }, [gameState.selectedIds, gameState.units, gameState.buildings, gameState.resourcesNodes]);
+
+  const selectionBoxStyle: React.CSSProperties = useMemo(() => {
+    if (!selectionBox) return { display: 'none' };
+    const { start, end } = selectionBox;
+    const left = Math.min(start.x, end.x);
+    const top = Math.min(start.y, end.y);
+    const width = Math.abs(start.x - end.x);
+    const height = Math.abs(start.y - end.y);
+    return {
+      position: 'absolute',
+      left,
+      top,
+      width,
+      height,
+      border: '1px solid #0ea5e9',
+      backgroundColor: 'rgba(14, 165, 233, 0.2)',
+      pointerEvents: 'none',
+      zIndex: 20,
+    };
+  }, [selectionBox]);
+
+  const handleStartGame = (mapType: MapType, players: PlayerSetupConfig[]) => {
+    dispatch({ type: 'START_NEW_GAME', payload: { mapType, players } });
+    setGamePhase('playing');
+  };
+
+  const handleBackToMenu = () => {
+    setGamePhase('menu');
+  };
+  
+  // A sensible default camera position for the menu view.
+  // The in-game camera controls will set the correct position when the game starts.
+  const initialCameraPos: [number, number, number] = [0, 60, 70];
+
+  return (
+    <div className="w-screen h-screen flex flex-col bg-black text-white font-sans">
+      {gamePhase === 'menu' && <MainMenu onStartGame={handleStartGame} />}
+      {gamePhase === 'playing' && <GameStatusOverlay status={gameState.gameStatus} onBackToMenu={handleBackToMenu} />}
+      {gamePhase === 'playing' && gameState.gameStatus === 'paused' && <PauseMenu dispatch={dispatch} onBackToMenu={handleBackToMenu} />}
+      {gamePhase === 'playing' && <UI gameState={gameState} selectedObjects={selectedObjects} dispatch={dispatch} fps={fps} camera={camera} cameraControlsRef={cameraControlsRef} />}
+      <div className="flex-grow relative">
+        {gamePhase === 'playing' && isSelecting && <div style={selectionBoxStyle} />}
+        <Canvas 
+          camera={{ position: initialCameraPos, fov: 35 }} 
+          shadows={false} 
+          dpr={[1, 1.25]}
+          gl={{ antialias: false, powerPreference: 'high-performance' }}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+            <GameScene
+              gamePhase={gamePhase}
+              gameState={gameState}
+              dispatch={dispatch}
+              setSelectionBox={setSelectionBox}
+              setIsSelecting={setIsSelecting}
+              setFps={setFps}
+              setCamera={setCamera}
+              cameraControlsRef={cameraControlsRef}
+            />
+        </Canvas>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <LocalizationProvider>
+      <AppContent />
+    </LocalizationProvider>
+  );
+}
