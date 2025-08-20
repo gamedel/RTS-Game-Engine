@@ -8,6 +8,11 @@ const GRID_RESOLUTION = 2; // Each grid cell represents a 0.5x0.5 world unit are
 const GRID_SIZE = WORLD_SIZE * GRID_RESOLUTION;
 const GRID_OFFSET = GRID_SIZE / 2;
 
+const MAX_UNIT_RADIUS = Math.max(
+    ...Object.values(COLLISION_DATA.UNITS).map((u: any) => u.radius)
+);
+const BUILDING_PADDING = MAX_UNIT_RADIUS + 0.5;
+
 // --- Helper Functions ---
 const toGridCoords = (pos: Vector3) => ({
     x: Math.round(pos.x * GRID_RESOLUTION + GRID_OFFSET),
@@ -38,8 +43,7 @@ const createGrid = (buildings: Record<string, Building>, resourcesNodes: Record<
     Object.values(buildings).forEach(b => {
         const size = COLLISION_DATA.BUILDINGS[b.buildingType];
         if (!size) return;
-        // Apply a consistent, larger padding to prevent units from getting stuck.
-        const padding = 1.0; 
+        const padding = BUILDING_PADDING;
         const box = {
             minX: b.position.x - (size.width / 2) - padding,
             maxX: b.position.x + (size.width / 2) + padding,
