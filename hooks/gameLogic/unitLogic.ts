@@ -153,22 +153,40 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                 const speed = UNIT_CONFIG[unit.unitType].speed;
                 const vectorToTarget = new THREE.Vector3().subVectors(targetPos, currentPos).normalize();
                 const moveVector = vectorToTarget.multiplyScalar(speed * delta);
-                const nextPos = currentPos.clone().add(moveVector);
+                let nextPos = currentPos.clone().add(moveVector);
 
-                // Prevent units from walking through newly placed buildings.
+                // Prevent units from walking through buildings. If a collision is detected,
+                // attempt to slide along the building edge. Only if sliding fails do we
+                // trigger a full path recalculation.
                 const unitRadius = COLLISION_DATA.UNITS[unit.unitType].radius;
-                let collided = false;
+                let blocked = false;
                 for (const building of Object.values(buildings)) {
                     const size = COLLISION_DATA.BUILDINGS[building.buildingType];
                     const halfW = size.width / 2 + unitRadius;
                     const halfD = size.depth / 2 + unitRadius;
-                    if (Math.abs(nextPos.x - building.position.x) < halfW && Math.abs(nextPos.z - building.position.z) < halfD) {
-                        collided = true;
-                        break;
+                    const dx = nextPos.x - building.position.x;
+                    const dz = nextPos.z - building.position.z;
+
+                    if (Math.abs(dx) < halfW && Math.abs(dz) < halfD) {
+                        const overlapX = halfW - Math.abs(dx);
+                        const overlapZ = halfD - Math.abs(dz);
+
+                        if (overlapX < overlapZ) {
+                            nextPos.x += dx > 0 ? overlapX : -overlapX;
+                        } else {
+                            nextPos.z += dz > 0 ? overlapZ : -overlapZ;
+                        }
+
+                        const ndx = nextPos.x - building.position.x;
+                        const ndz = nextPos.z - building.position.z;
+                        if (Math.abs(ndx) < halfW && Math.abs(ndz) < halfD) {
+                            blocked = true;
+                            break;
+                        }
                     }
                 }
 
-                if (collided) {
+                if (blocked) {
                     if (unit.pathTarget && !PathfindingManager.isRequestPending(unit.id)) {
                         dispatch({ type: 'UPDATE_UNIT', payload: { id: unit.id, path: undefined, pathIndex: undefined, targetPosition: undefined } });
                         PathfindingManager.requestPath(unit.id, unit.position, unit.pathTarget);
