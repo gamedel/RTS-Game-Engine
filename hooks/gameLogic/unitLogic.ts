@@ -154,9 +154,31 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                 const vectorToTarget = new THREE.Vector3().subVectors(targetPos, currentPos).normalize();
                 const moveVector = vectorToTarget.multiplyScalar(speed * delta);
                 const nextPos = currentPos.clone().add(moveVector);
+
+                // Prevent units from walking through newly placed buildings.
+                const unitRadius = COLLISION_DATA.UNITS[unit.unitType].radius;
+                let collided = false;
+                for (const building of Object.values(buildings)) {
+                    const size = COLLISION_DATA.BUILDINGS[building.buildingType];
+                    const halfW = size.width / 2 + unitRadius;
+                    const halfD = size.depth / 2 + unitRadius;
+                    if (Math.abs(nextPos.x - building.position.x) < halfW && Math.abs(nextPos.z - building.position.z) < halfD) {
+                        collided = true;
+                        break;
+                    }
+                }
+
+                if (collided) {
+                    if (unit.pathTarget && !PathfindingManager.isRequestPending(unit.id)) {
+                        dispatch({ type: 'UPDATE_UNIT', payload: { id: unit.id, path: undefined, pathIndex: undefined, targetPosition: undefined } });
+                        PathfindingManager.requestPath(unit.id, unit.position, unit.pathTarget);
+                    }
+                    continue;
+                }
+
                 dispatch({ type: 'UPDATE_UNIT', payload: { id: unit.id, position: { x: nextPos.x, y: 0, z: nextPos.z } } });
             }
-        } 
+        }
 
         // --- Non-Movement & Timer Logic (when not following a path) ---
         if (!unit.path) {
