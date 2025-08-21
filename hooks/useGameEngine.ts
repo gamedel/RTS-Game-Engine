@@ -33,6 +33,11 @@ export const useGameEngine = (gameState: GameState, dispatch: React.Dispatch<Act
     return () => PathfindingManager.terminate();
   }, [dispatch]);
 
+  // Rebuild pathfinding grid only when obstacles change
+  useEffect(() => {
+    PathfindingManager.setGrid(gameState.buildings, gameState.resourcesNodes);
+  }, [gameState.buildings, gameState.resourcesNodes]);
+
   useFrame((_, delta) => {
     // FPS calculation
     frames.current++;
@@ -46,8 +51,7 @@ export const useGameEngine = (gameState: GameState, dispatch: React.Dispatch<Act
     const state = gameStateRef.current;
     if (state.gameStatus !== 'playing') return;
 
-    // --- Pathfinding Grid Update & Queue Processing ---
-    PathfindingManager.setGrid(state.buildings, state.resourcesNodes);
+    // --- Pathfinding Queue Processing ---
     PathfindingManager.processQueue();
 
     // --- Fixed Time Step Logic ---

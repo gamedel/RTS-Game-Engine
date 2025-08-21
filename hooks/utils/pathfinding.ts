@@ -81,6 +81,32 @@ function clampToGrid(node: { x: number; y: number }, W: number, H: number) {
     if (node.y < 0 || node.y >= H) node.y = Math.max(0, Math.min(H - 1, node.y));
 }
 
+function findNearestWalkable(grid: number[][], start: { x: number; y: number }): { x: number; y: number } | null {
+    const H = grid.length;
+    const W = grid[0]?.length || 0;
+    const visited = new Set<string>();
+    const queue: Array<{ x: number; y: number; d: number }> = [{ ...start, d: 0 }];
+    const directions = [
+        [1, 0], [-1, 0], [0, 1], [0, -1],
+        [1, 1], [1, -1], [-1, 1], [-1, -1]
+    ];
+    const MAX_DISTANCE = 10;
+
+    while (queue.length > 0) {
+        const { x, y, d } = queue.shift()!;
+        if (x < 0 || x >= W || y < 0 || y >= H) continue;
+        const key = `${x},${y}`;
+        if (visited.has(key)) continue;
+        visited.add(key);
+        if (grid[y][x] === 0) return { x, y };
+        if (d >= MAX_DISTANCE) continue;
+        for (const [dx, dy] of directions) {
+            queue.push({ x: x + dx, y: y + dy, d: d + 1 });
+        }
+    }
+    return null;
+}
+
 // --- Manager Implementation ---
 type PathRequest = {
     unitId: string;
@@ -124,24 +150,30 @@ export const PathfindingManager = {
             const { unitId, startPos, endPos } = request;
             const H = gridMatrix.length,
                 W = gridMatrix[0]?.length || 0;
-            const start = toGridCoords(startPos);
+            let start = toGridCoords(startPos);
             const end = toGridCoords(endPos);
             clampToGrid(start, W, H);
             clampToGrid(end, W, H);
 
             if (gridMatrix[start.y]?.[start.x] === 1) {
-                pendingRequests.delete(unitId);
-                dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
-            } else {
-                const grid = pathfindingGrid.clone();
-                const rawPath = finder.findPath(start.x, start.y, end.x, end.y, grid);
-                pendingRequests.delete(unitId);
-                if (rawPath && rawPath.length > 0) {
-                    const worldPath = rawPath.map(([x, y]) => fromGridCoords({ x, y }));
-                    dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path: worldPath, pathIndex: 0, targetPosition: worldPath[0] } });
+                const alt = findNearestWalkable(gridMatrix, start);
+                if (alt) {
+                    start = alt;
                 } else {
+                    pendingRequests.delete(unitId);
                     dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
+                    return;
                 }
+            }
+
+            const grid = pathfindingGrid.clone();
+            const rawPath = finder.findPath(start.x, start.y, end.x, end.y, grid);
+            pendingRequests.delete(unitId);
+            if (rawPath && rawPath.length > 0) {
+                const worldPath = rawPath.map(([x, y]) => fromGridCoords({ x, y }));
+                dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path: worldPath, pathIndex: 0, targetPosition: worldPath[0] } });
+            } else {
+                dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
             }
         }
     },
