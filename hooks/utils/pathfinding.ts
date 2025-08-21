@@ -1,17 +1,18 @@
 import type { Dispatch } from 'react';
-import { Building, ResourceNode, Vector3, Action, UnitStatus } from '../../types';
+import { Building, ResourceNode, Vector3, Action, UnitStatus, UnitType } from '../../types';
 import { COLLISION_DATA } from '../../constants';
+import * as THREE from 'three';
 
 // --- Pathfinding Constants ---
 const WORLD_SIZE = 300;
-const GRID_RESOLUTION = 2; // Each grid cell represents a 0.5x0.5 world unit area.
+const GRID_RESOLUTION = 1; // 1 grid cell = 1 world unit area.
 const GRID_SIZE = WORLD_SIZE * GRID_RESOLUTION;
 const GRID_OFFSET = GRID_SIZE / 2;
 
 const MAX_UNIT_RADIUS = Math.max(
     ...Object.values(COLLISION_DATA.UNITS).map((u: any) => u.radius)
 );
-const BUILDING_PADDING = MAX_UNIT_RADIUS + 1;
+const BUILDING_PADDING = MAX_UNIT_RADIUS + 0.5;
 
 // --- Helper Functions ---
 const toGridCoords = (pos: Vector3) => ({
@@ -29,14 +30,13 @@ const createGrid = (buildings: Record<string, Building>, resourcesNodes: Record<
     const grid = Array(GRID_SIZE).fill(0).map(() => Array(GRID_SIZE).fill(0));
 
     const fillGrid = (box: { minX: number, maxX: number, minZ: number, maxZ: number }) => {
-        for (let x = Math.floor(box.minX); x <= Math.ceil(box.maxX); x++) {
-            for (let z = Math.floor(box.minZ); z <= Math.ceil(box.maxZ); z++) {
-                const gridX = Math.round(x * GRID_RESOLUTION + GRID_OFFSET);
-                const gridZ = Math.round(z * GRID_RESOLUTION + GRID_OFFSET);
-                if (gridX >= 0 && gridX < GRID_SIZE && gridZ >= 0 && gridZ < GRID_SIZE) {
-                    grid[gridZ][gridX] = 1; // Mark as unwalkable
-                }
-            }
+        const minGX = Math.max(0, Math.floor(box.minX * GRID_RESOLUTION + GRID_OFFSET));
+        const maxGX = Math.min(GRID_SIZE - 1, Math.ceil(box.maxX * GRID_RESOLUTION + GRID_OFFSET));
+        const minGZ = Math.max(0, Math.floor(box.minZ * GRID_RESOLUTION + GRID_OFFSET));
+        const maxGZ = Math.min(GRID_SIZE - 1, Math.ceil(box.maxZ * GRID_RESOLUTION + GRID_OFFSET));
+        for (let gz = minGZ; gz <= maxGZ; gz++) {
+            const row = grid[gz];
+            for (let gx = minGX; gx <= maxGX; gx++) row[gx] = 1;
         }
     };
 
@@ -54,6 +54,7 @@ const createGrid = (buildings: Record<string, Building>, resourcesNodes: Record<
     });
 
     Object.values(resourcesNodes).forEach(r => {
+        if (r.isFalling || r.isDepleting) return;
         const size = COLLISION_DATA.RESOURCES[r.resourceType];
         if (!size) return;
         const padding = 0.5;
@@ -69,6 +70,34 @@ const createGrid = (buildings: Record<string, Building>, resourcesNodes: Record<
     return grid;
 };
 
+export function getBuildingApproachPoint(
+    building: Building,
+    from: Vector3,
+    unitType: UnitType
+): Vector3 {
+    const size = COLLISION_DATA.BUILDINGS[building.buildingType];
+    const unitR = COLLISION_DATA.UNITS[unitType].radius;
+    const margin = 0.6;
+
+    const halfW = size.width / 2 + unitR + margin;
+    const halfD = size.depth / 2 + unitR + margin;
+
+    const center = new THREE.Vector3(building.position.x, 0, building.position.z);
+    const dir = new THREE.Vector3(from.x, 0, from.z).sub(center);
+    if (dir.lengthSq() < 1e-4) dir.set(1, 0, 0);
+    dir.normalize();
+
+    const target = center.clone().add(
+        new THREE.Vector3(
+            THREE.MathUtils.clamp(dir.x * Math.max(Math.abs(dir.x), Math.abs(dir.z)) * halfW, -halfW, halfW),
+            0,
+            THREE.MathUtils.clamp(dir.z * Math.max(Math.abs(dir.x), Math.abs(dir.z)) * halfD, -halfD, halfD),
+        )
+    );
+
+    return { x: target.x, y: 0, z: target.z };
+}
+
 // --- Manager Implementation ---
 type PathRequest = {
     unitId: string;
@@ -78,6 +107,7 @@ type PathRequest = {
 
 let dispatchRef: Dispatch<Action> | null = null;
 let gridMatrix: number[][] | null = null;
+let lastSignature: string | null = null;
 const requestQueue: PathRequest[] = [];
 const pendingRequests = new Set<string>();
 let worker: Worker | null = null;
@@ -99,7 +129,13 @@ export const PathfindingManager = {
         };
     },
 
-    setGrid: (buildings: Record<string, Building>, resourcesNodes: Record<string, ResourceNode>) => {
+    setGrid: (
+        buildings: Record<string, Building>,
+        resourcesNodes: Record<string, ResourceNode>,
+        signature?: string
+    ) => {
+        if (signature && signature === lastSignature) return;
+        lastSignature = signature || null;
         gridMatrix = createGrid(buildings, resourcesNodes);
         worker?.postMessage({ type: 'setGrid', grid: gridMatrix });
     },

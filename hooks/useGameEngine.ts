@@ -34,9 +34,25 @@ export const useGameEngine = (gameState: GameState, dispatch: React.Dispatch<Act
   }, [dispatch]);
 
   // Rebuild pathfinding grid only when obstacles change
-  useEffect(() => {
-    PathfindingManager.setGrid(gameState.buildings, gameState.resourcesNodes);
+  const obstaclesSignature = useMemo(() => {
+    const b = Object.values(gameState.buildings)
+      .map(b => `${b.buildingType}@${Math.round(b.position.x * 2)},${Math.round(b.position.z * 2)}`)
+      .sort()
+      .join('|');
+
+    const r = Object.values(gameState.resourcesNodes)
+      .filter(r => !r.isFalling && !r.isDepleting)
+      .map(r => `${r.resourceType}@${Math.round(r.position.x * 2)},${Math.round(r.position.z * 2)}`)
+      .sort()
+      .join('|');
+
+    return `${b}||${r}`;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gameState.buildings, gameState.resourcesNodes]);
+
+  useEffect(() => {
+    PathfindingManager.setGrid(gameState.buildings, gameState.resourcesNodes, obstaclesSignature);
+  }, [obstaclesSignature]);
 
   useFrame((_, delta) => {
     // FPS calculation

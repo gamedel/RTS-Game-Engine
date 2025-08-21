@@ -351,5 +351,19 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                 }
             }
         }
+
+        const now = performance.now();
+        const last = unit.lastPositionCheck || { pos: unit.position, time: now };
+        const dx = unit.position.x - last.pos.x;
+        const dz = unit.position.z - last.pos.z;
+        const movedSq = dx * dx + dz * dz;
+        if (unit.status === UnitStatus.MOVING) {
+            if (now - last.time > 1200) {
+                if (movedSq < 0.02 * 0.02 && unit.pathTarget && !PathfindingManager.isRequestPending(unit.id)) {
+                    PathfindingManager.requestPath(unit.id, unit.position, unit.pathTarget);
+                }
+                dispatch({ type: 'UPDATE_UNIT', payload: { id: unit.id, lastPositionCheck: { pos: unit.position, time: now } } });
+            }
+        }
     }
 };

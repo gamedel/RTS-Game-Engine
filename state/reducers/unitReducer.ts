@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { v4 as uuidv4 } from 'uuid';
 import { GameState, Action, Unit, GameObjectType, UnitType, UnitStatus, Building, ResourceNode, FloatingText, UnitStance, BuildingType, ResourceType, Vector3, ResearchCategory } from '../../types';
+import { getBuildingApproachPoint } from '../../hooks/utils/pathfinding';
 import { UNIT_CONFIG, COLLISION_DATA, RESEARCH_CONFIG } from '../../constants';
 
 export function unitReducer(state: GameState, action: Action): GameState {
@@ -53,14 +54,20 @@ export function unitReducer(state: GameState, action: Action): GameState {
 
 
             if (isWorkerRepairing) {
-                 return { ...state, units: { ...state.units, [unitId]: { ...unit, ...taskAssignment, status: UnitStatus.MOVING, pathTarget: targetPosition, targetId: targetId, repairTask: { buildingId: targetId! }, buildTask: undefined, resourcePayload: undefined, finalDestination: newFinalDestination, path: undefined, pathIndex: undefined, targetPosition: undefined } } };
+                const building = targetObject as Building;
+                const approach = getBuildingApproachPoint(building, unit.position, unit.unitType);
+                return { ...state, units: { ...state.units, [unitId]: { ...unit, ...taskAssignment, status: UnitStatus.MOVING, pathTarget: approach, targetId: targetId, repairTask: { buildingId: targetId! }, buildTask: undefined, resourcePayload: undefined, finalDestination: newFinalDestination, path: undefined, pathIndex: undefined, targetPosition: undefined } } };
             }
             if (isWorkerConstructing) {
                 const building = targetObject as Building;
-                return { ...state, units: { ...state.units, [unitId]: { ...unit, ...taskAssignment, status: UnitStatus.MOVING, pathTarget: building.position, targetId: building.id, buildTask: { buildingId: building.id, position: building.position }, finalDestination: newFinalDestination, path: undefined, pathIndex: undefined, targetPosition: undefined } } };
+                const approach = getBuildingApproachPoint(building, unit.position, unit.unitType);
+                return { ...state, units: { ...state.units, [unitId]: { ...unit, ...taskAssignment, status: UnitStatus.MOVING, pathTarget: approach, targetId: building.id, buildTask: { buildingId: building.id, position: building.position }, finalDestination: newFinalDestination, path: undefined, pathIndex: undefined, targetPosition: undefined } } };
             }
 
             let finalTargetPosition = targetPosition;
+            if (targetObject?.type === GameObjectType.BUILDING) {
+                finalTargetPosition = getBuildingApproachPoint(targetObject as Building, unit.position, unit.unitType);
+            }
             if (isGatherCommand) {
                 const resource = targetObject as ResourceNode;
                 const resourceConfig = COLLISION_DATA.RESOURCES[resource.resourceType];

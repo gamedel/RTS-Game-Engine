@@ -2,7 +2,7 @@
 import { Grid, JumpPointFinder, DiagonalMovement } from 'pathfinding';
 
 let gridMatrix: number[][] | null = null;
-const finder = new JumpPointFinder({ diagonalMovement: DiagonalMovement.OnlyWhenNoObstacle });
+const finder = new JumpPointFinder({ diagonalMovement: DiagonalMovement.IfAtMostOneObstacle });
 
 function clampToGrid(node: { x: number; y: number }, W: number, H: number) {
   if (node.x < 0 || node.x >= W) node.x = Math.max(0, Math.min(W - 1, node.x));
@@ -18,7 +18,7 @@ function findNearestWalkable(grid: number[][], start: { x: number; y: number }):
     [1, 0], [-1, 0], [0, 1], [0, -1],
     [1, 1], [1, -1], [-1, 1], [-1, -1]
   ];
-  const MAX_DISTANCE = 10;
+  const MAX_DISTANCE = 30;
 
   while (queue.length > 0) {
     const { x, y, d } = queue.shift()!;

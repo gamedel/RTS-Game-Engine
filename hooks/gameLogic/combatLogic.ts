@@ -3,6 +3,7 @@ import { GameState, UnitStatus, Unit, GameObjectType, UnitStance, Building, Floa
 import { UNIT_CONFIG, arePlayersHostile, getAttackBonus, getDefenseBonus } from '../../constants';
 import { v4 as uuidv4 } from 'uuid';
 import { BufferedDispatch } from '../../state/batch';
+import { getBuildingApproachPoint } from '../utils/pathfinding';
 
 export const processCombatLogic = (state: GameState, delta: number, dispatch: BufferedDispatch) => {
     const { units, buildings, players } = state;
@@ -41,8 +42,12 @@ export const processCombatLogic = (state: GameState, delta: number, dispatch: Bu
                 }
             }
             if (closestEnemy) {
+                let targetPos = closestEnemy.position;
+                if (closestEnemy.type === GameObjectType.BUILDING) {
+                    targetPos = getBuildingApproachPoint(closestEnemy as Building, unit.position, unit.unitType);
+                }
                 // Use COMMAND_UNIT to trigger pathfinding
-                dispatch({ type: 'COMMAND_UNIT', payload: { unitId: unit.id, targetPosition: closestEnemy.position, targetId: closestEnemy.id, finalDestination: closestEnemy.position } });
+                dispatch({ type: 'COMMAND_UNIT', payload: { unitId: unit.id, targetPosition: targetPos, targetId: closestEnemy.id, finalDestination: targetPos } });
             }
         }
         
@@ -108,7 +113,11 @@ export const processCombatLogic = (state: GameState, delta: number, dispatch: Bu
                 // Re-issue the command only if the target has moved significantly to prevent spamming path requests.
                 const currentTargetPos = unit.pathTarget || unit.targetPosition;
                 if (!currentTargetPos || new THREE.Vector3(currentTargetPos.x, 0, currentTargetPos.z).distanceToSquared(targetVec) > 2*2) {
-                     dispatch({ type: 'COMMAND_UNIT', payload: { unitId: unit.id, targetPosition: target.position, targetId: target.id } });
+                    let targetPos = target.position;
+                    if (target.type === GameObjectType.BUILDING) {
+                        targetPos = getBuildingApproachPoint(target as Building, unit.position, unit.unitType);
+                    }
+                    dispatch({ type: 'COMMAND_UNIT', payload: { unitId: unit.id, targetPosition: targetPos, targetId: target.id } });
                 }
             }
         }
