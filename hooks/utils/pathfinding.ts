@@ -12,7 +12,7 @@ const GRID_OFFSET = GRID_SIZE / 2;
 const MAX_UNIT_RADIUS = Math.max(
     ...Object.values(COLLISION_DATA.UNITS).map((u: any) => u.radius)
 );
-const BUILDING_PADDING = MAX_UNIT_RADIUS + 0.5;
+const BUILDING_PADDING = MAX_UNIT_RADIUS + 1;
 
 // --- External Pathfinder ---
 const finder = new PF.AStarFinder({

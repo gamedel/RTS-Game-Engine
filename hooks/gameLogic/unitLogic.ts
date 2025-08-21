@@ -156,8 +156,8 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                 let nextPos = currentPos.clone().add(moveVector);
 
                 // Prevent units from walking through buildings. If a collision is detected,
-                // attempt to slide along the building edge. Only if sliding fails do we
-                // trigger a full path recalculation.
+                // attempt to slide along the building edge. If the unit still ends up inside
+                // the building bounds, push it to the nearest edge and request a new path.
                 const unitRadius = COLLISION_DATA.UNITS[unit.unitType].radius;
                 let blocked = false;
                 for (const building of Object.values(buildings)) {
@@ -172,9 +172,9 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                         const overlapZ = halfD - Math.abs(dz);
 
                         if (overlapX < overlapZ) {
-                            nextPos.x += dx > 0 ? overlapX : -overlapX;
+                            nextPos.x = building.position.x + (dx > 0 ? halfW : -halfW);
                         } else {
-                            nextPos.z += dz > 0 ? overlapZ : -overlapZ;
+                            nextPos.z = building.position.z + (dz > 0 ? halfD : -halfD);
                         }
 
                         const ndx = nextPos.x - building.position.x;
@@ -187,9 +187,11 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                 }
 
                 if (blocked) {
+                    const newPos = { x: nextPos.x, y: 0, z: nextPos.z };
+                    const payload: Partial<Unit> & { id: string } = { id: unit.id, position: newPos, path: undefined, pathIndex: undefined, targetPosition: undefined };
+                    dispatch({ type: 'UPDATE_UNIT', payload });
                     if (unit.pathTarget && !PathfindingManager.isRequestPending(unit.id)) {
-                        dispatch({ type: 'UPDATE_UNIT', payload: { id: unit.id, path: undefined, pathIndex: undefined, targetPosition: undefined } });
-                        PathfindingManager.requestPath(unit.id, unit.position, unit.pathTarget);
+                        PathfindingManager.requestPath(unit.id, newPos, unit.pathTarget);
                     }
                     continue;
                 }
