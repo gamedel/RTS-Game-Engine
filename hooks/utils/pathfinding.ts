@@ -1,5 +1,5 @@
-import React from 'react';
-import EasyStar from 'easystarjs';
+import type { Dispatch } from 'react';
+import PF, { Grid } from 'pathfinding';
 import { Building, ResourceNode, Vector3, Action, UnitStatus } from '../../types';
 import { COLLISION_DATA } from '../../constants';
 
@@ -15,11 +15,10 @@ const MAX_UNIT_RADIUS = Math.max(
 const BUILDING_PADDING = MAX_UNIT_RADIUS + 0.5;
 
 // --- External Pathfinder ---
-const easystar = new EasyStar.js();
-easystar.setAcceptableTiles([0]);
-easystar.enableDiagonals();
-easystar.disableCornerCutting();
-easystar.setIterationsPerCalculation(1000);
+const finder = new PF.AStarFinder({
+    allowDiagonal: true,
+    dontCrossCorners: true,
+});
 
 // --- Helper Functions ---
 const toGridCoords = (pos: Vector3) => ({
@@ -89,19 +88,20 @@ type PathRequest = {
     endPos: Vector3;
 };
 
-let dispatchRef: React.Dispatch<Action> | null = null;
-let pathfindingGrid: number[][] | null = null;
+let dispatchRef: Dispatch<Action> | null = null;
+let gridMatrix: number[][] | null = null;
+let pathfindingGrid: Grid | null = null;
 const requestQueue: PathRequest[] = [];
 const pendingRequests = new Set<string>();
 
 export const PathfindingManager = {
-    init: (dispatch: React.Dispatch<Action>) => {
+    init: (dispatch: Dispatch<Action>) => {
         dispatchRef = dispatch;
     },
 
     setGrid: (buildings: Record<string, Building>, resourcesNodes: Record<string, ResourceNode>) => {
-        pathfindingGrid = createGrid(buildings, resourcesNodes);
-        easystar.setGrid(pathfindingGrid);
+        gridMatrix = createGrid(buildings, resourcesNodes);
+        pathfindingGrid = new PF.Grid(gridMatrix);
     },
 
     requestPath: (unitId: string, startPos: Vector3, endPos: Vector3) => {
@@ -116,35 +116,34 @@ export const PathfindingManager = {
     
     // This will be called on each game tick to process a part of the queue
     processQueue: () => {
-        if (!pathfindingGrid || !dispatchRef) return;
+        if (!pathfindingGrid || !gridMatrix || !dispatchRef) return;
 
         // Kick off one request per frame and process existing ones
         const request = requestQueue.shift();
         if (request) {
             const { unitId, startPos, endPos } = request;
-            const H = pathfindingGrid.length, W = pathfindingGrid[0]?.length || 0;
+            const H = gridMatrix.length,
+                W = gridMatrix[0]?.length || 0;
             const start = toGridCoords(startPos);
             const end = toGridCoords(endPos);
             clampToGrid(start, W, H);
             clampToGrid(end, W, H);
 
-            if (pathfindingGrid[start.y]?.[start.x] === 1) {
+            if (gridMatrix[start.y]?.[start.x] === 1) {
                 pendingRequests.delete(unitId);
                 dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
             } else {
-                easystar.findPath(start.x, start.y, end.x, end.y, rawPath => {
-                    pendingRequests.delete(unitId);
-                    if (rawPath && rawPath.length > 0) {
-                        const worldPath = rawPath.map(({ x, y }) => fromGridCoords({ x, y }));
-                        dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path: worldPath, pathIndex: 0, targetPosition: worldPath[0] } });
-                    } else {
-                        dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
-                    }
-                });
+                const grid = pathfindingGrid.clone();
+                const rawPath = finder.findPath(start.x, start.y, end.x, end.y, grid);
+                pendingRequests.delete(unitId);
+                if (rawPath && rawPath.length > 0) {
+                    const worldPath = rawPath.map(([x, y]) => fromGridCoords({ x, y }));
+                    dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path: worldPath, pathIndex: 0, targetPosition: worldPath[0] } });
+                } else {
+                    dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
+                }
             }
         }
-
-        easystar.calculate();
     },
 
     terminate: () => {
