@@ -1,5 +1,4 @@
 import type { Dispatch } from 'react';
-import PF, { Grid } from 'pathfinding';
 import { Building, ResourceNode, Vector3, Action, UnitStatus } from '../../types';
 import { COLLISION_DATA } from '../../constants';
 
@@ -13,12 +12,6 @@ const MAX_UNIT_RADIUS = Math.max(
     ...Object.values(COLLISION_DATA.UNITS).map((u: any) => u.radius)
 );
 const BUILDING_PADDING = MAX_UNIT_RADIUS + 1;
-
-// --- External Pathfinder ---
-const finder = new PF.AStarFinder({
-    allowDiagonal: true,
-    dontCrossCorners: true,
-});
 
 // --- Helper Functions ---
 const toGridCoords = (pos: Vector3) => ({
@@ -76,37 +69,6 @@ const createGrid = (buildings: Record<string, Building>, resourcesNodes: Record<
     return grid;
 };
 
-function clampToGrid(node: { x: number; y: number }, W: number, H: number) {
-    if (node.x < 0 || node.x >= W) node.x = Math.max(0, Math.min(W - 1, node.x));
-    if (node.y < 0 || node.y >= H) node.y = Math.max(0, Math.min(H - 1, node.y));
-}
-
-function findNearestWalkable(grid: number[][], start: { x: number; y: number }): { x: number; y: number } | null {
-    const H = grid.length;
-    const W = grid[0]?.length || 0;
-    const visited = new Set<string>();
-    const queue: Array<{ x: number; y: number; d: number }> = [{ ...start, d: 0 }];
-    const directions = [
-        [1, 0], [-1, 0], [0, 1], [0, -1],
-        [1, 1], [1, -1], [-1, 1], [-1, -1]
-    ];
-    const MAX_DISTANCE = 10;
-
-    while (queue.length > 0) {
-        const { x, y, d } = queue.shift()!;
-        if (x < 0 || x >= W || y < 0 || y >= H) continue;
-        const key = `${x},${y}`;
-        if (visited.has(key)) continue;
-        visited.add(key);
-        if (grid[y][x] === 0) return { x, y };
-        if (d >= MAX_DISTANCE) continue;
-        for (const [dx, dy] of directions) {
-            queue.push({ x: x + dx, y: y + dy, d: d + 1 });
-        }
-    }
-    return null;
-}
-
 // --- Manager Implementation ---
 type PathRequest = {
     unitId: string;
@@ -116,72 +78,54 @@ type PathRequest = {
 
 let dispatchRef: Dispatch<Action> | null = null;
 let gridMatrix: number[][] | null = null;
-let pathfindingGrid: Grid | null = null;
 const requestQueue: PathRequest[] = [];
 const pendingRequests = new Set<string>();
+let worker: Worker | null = null;
 
 export const PathfindingManager = {
     init: (dispatch: Dispatch<Action>) => {
         dispatchRef = dispatch;
+        worker = new Worker(new URL('./pathWorker.ts', import.meta.url), { type: 'module' });
+        worker.onmessage = (e: MessageEvent) => {
+            const { type, id, path } = e.data as { type: string; id: string; path: number[][] };
+            if (type !== 'path' || !dispatchRef) return;
+            pendingRequests.delete(id);
+            if (path && path.length > 0) {
+                const worldPath = path.map(([x, y]) => fromGridCoords({ x, y }));
+                dispatchRef({ type: 'UPDATE_UNIT', payload: { id, path: worldPath, pathIndex: 0, targetPosition: worldPath[0] } });
+            } else {
+                dispatchRef({ type: 'UPDATE_UNIT', payload: { id, pathTarget: undefined, status: UnitStatus.IDLE } });
+            }
+        };
     },
 
     setGrid: (buildings: Record<string, Building>, resourcesNodes: Record<string, ResourceNode>) => {
         gridMatrix = createGrid(buildings, resourcesNodes);
-        pathfindingGrid = new PF.Grid(gridMatrix);
+        worker?.postMessage({ type: 'setGrid', grid: gridMatrix });
     },
 
     requestPath: (unitId: string, startPos: Vector3, endPos: Vector3) => {
-        if (pendingRequests.has(unitId)) return;
+        if (pendingRequests.has(unitId) || !worker) return;
         pendingRequests.add(unitId);
         requestQueue.push({ unitId, startPos, endPos });
     },
 
-    isRequestPending: (unitId: string): boolean => {
-        return pendingRequests.has(unitId);
-    },
-    
-    // This will be called on each game tick to process a part of the queue
-    processQueue: () => {
-        if (!pathfindingGrid || !gridMatrix || !dispatchRef) return;
+    isRequestPending: (unitId: string): boolean => pendingRequests.has(unitId),
 
-        // Kick off one request per frame and process existing ones
+    processQueue: () => {
+        if (!worker) return;
         const request = requestQueue.shift();
         if (request) {
-            const { unitId, startPos, endPos } = request;
-            const H = gridMatrix.length,
-                W = gridMatrix[0]?.length || 0;
-            let start = toGridCoords(startPos);
-            const end = toGridCoords(endPos);
-            clampToGrid(start, W, H);
-            clampToGrid(end, W, H);
-
-            if (gridMatrix[start.y]?.[start.x] === 1) {
-                const alt = findNearestWalkable(gridMatrix, start);
-                if (alt) {
-                    start = alt;
-                } else {
-                    pendingRequests.delete(unitId);
-                    dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
-                    return;
-                }
-            }
-
-            const grid = pathfindingGrid.clone();
-            const rawPath = finder.findPath(start.x, start.y, end.x, end.y, grid);
-            pendingRequests.delete(unitId);
-            if (rawPath && rawPath.length > 0) {
-                const worldPath = rawPath.map(([x, y]) => fromGridCoords({ x, y }));
-                dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path: worldPath, pathIndex: 0, targetPosition: worldPath[0] } });
-            } else {
-                dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
-            }
+            const start = toGridCoords(request.startPos);
+            const end = toGridCoords(request.endPos);
+            worker.postMessage({ type: 'findPath', id: request.unitId, start, end });
         }
     },
 
     terminate: () => {
-        // Clear everything on cleanup
         dispatchRef = null;
-        pathfindingGrid = null;
+        worker?.terminate();
+        worker = null;
         requestQueue.length = 0;
         pendingRequests.clear();
     }
