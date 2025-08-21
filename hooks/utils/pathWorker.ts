@@ -1,8 +1,8 @@
 /// <reference lib="webworker" />
-import { Grid, AStarFinder } from 'pathfinding';
+import { Grid, JumpPointFinder, DiagonalMovement } from 'pathfinding';
 
 let gridMatrix: number[][] | null = null;
-const finder = new AStarFinder({ allowDiagonal: true, dontCrossCorners: true });
+const finder = new JumpPointFinder({ diagonalMovement: DiagonalMovement.OnlyWhenNoObstacle });
 
 function clampToGrid(node: { x: number; y: number }, W: number, H: number) {
   if (node.x < 0 || node.x >= W) node.x = Math.max(0, Math.min(W - 1, node.x));
@@ -44,7 +44,7 @@ self.onmessage = (e: MessageEvent) => {
     const H = gridMatrix.length;
     const W = gridMatrix[0]?.length || 0;
     let s = { ...start };
-    const t = { ...end };
+    let t = { ...end };
     clampToGrid(s, W, H);
     clampToGrid(t, W, H);
 
@@ -52,6 +52,16 @@ self.onmessage = (e: MessageEvent) => {
       const alt = findNearestWalkable(gridMatrix, s);
       if (alt) {
         s = alt;
+      } else {
+        (self as any).postMessage({ type: 'path', id, path: [] });
+        return;
+      }
+    }
+
+    if (gridMatrix[t.y]?.[t.x] === 1) {
+      const alt = findNearestWalkable(gridMatrix, t);
+      if (alt) {
+        t = alt;
       } else {
         (self as any).postMessage({ type: 'path', id, path: [] });
         return;
