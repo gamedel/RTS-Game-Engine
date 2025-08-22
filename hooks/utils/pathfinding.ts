@@ -108,6 +108,7 @@ type PathRequest = {
 let dispatchRef: Dispatch<Action> | null = null;
 let gridMatrix: number[][] | null = null;
 let lastSignature: string | null = null;
+let gridReady = false;
 const requestQueue: PathRequest[] = [];
 const pendingRequests = new Set<string>();
 let worker: Worker | null = null;
@@ -117,8 +118,13 @@ export const PathfindingManager = {
         dispatchRef = dispatch;
         worker = new Worker(new URL('./pathWorker.ts', import.meta.url), { type: 'module' });
         worker.onmessage = (e: MessageEvent) => {
-            const { type, id, path } = e.data as { type: string; id: string; path: number[][] };
-            if (type !== 'path' || !dispatchRef) return;
+            const msg = e.data as any;
+            if (msg.type === 'gridReady') {
+                gridReady = true;
+                return;
+            }
+            if (msg.type !== 'path' || !dispatchRef) return;
+            const { id, path } = msg as { id: string; path: number[][] };
             pendingRequests.delete(id);
             if (path && path.length > 0) {
                 const worldPath = path.map(([x, y]) => fromGridCoords({ x, y }));
@@ -136,24 +142,28 @@ export const PathfindingManager = {
     ) => {
         if (signature && signature === lastSignature) return;
         lastSignature = signature || null;
+        gridReady = false;
         gridMatrix = createGrid(buildings, resourcesNodes);
         worker?.postMessage({ type: 'setGrid', grid: gridMatrix });
     },
 
     requestPath: (unitId: string, startPos: Vector3, endPos: Vector3) => {
-        if (pendingRequests.has(unitId) || !worker) return;
-        pendingRequests.add(unitId);
+        if (!worker) return;
+        if (pendingRequests.has(unitId)) return;
+        if (requestQueue.some(r => r.unitId === unitId)) return;
         requestQueue.push({ unitId, startPos, endPos });
     },
 
     isRequestPending: (unitId: string): boolean => pendingRequests.has(unitId),
 
     processQueue: () => {
-        if (!worker) return;
-        const request = requestQueue.shift();
-        if (request) {
+        if (!worker || !gridReady) return;
+        for (let i = 0; i < 4; i++) {
+            const request = requestQueue.shift();
+            if (!request) break;
             const start = toGridCoords(request.startPos);
             const end = toGridCoords(request.endPos);
+            pendingRequests.add(request.unitId);
             worker.postMessage({ type: 'findPath', id: request.unitId, start, end });
         }
     },
@@ -164,5 +174,8 @@ export const PathfindingManager = {
         worker = null;
         requestQueue.length = 0;
         pendingRequests.clear();
+        gridReady = false;
+        lastSignature = null;
+        gridMatrix = null;
     }
 };

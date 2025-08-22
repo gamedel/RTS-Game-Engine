@@ -39,6 +39,8 @@ self.onmessage = (e: MessageEvent) => {
   const data = e.data as any;
   if (data.type === 'setGrid') {
     gridMatrix = data.grid as number[][];
+    (self as any).postMessage({ type: 'gridReady' });
+    return;
   } else if (data.type === 'findPath' && gridMatrix) {
     const { id, start, end } = data;
     const H = gridMatrix.length;
