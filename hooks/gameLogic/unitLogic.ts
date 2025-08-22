@@ -3,7 +3,9 @@ import { GameState, Action, UnitStatus, ResourceType, UnitType, Unit, GameObject
 import { UNIT_CONFIG, COLLISION_DATA, BUILDING_CONFIG, REPAIR_TICK_TIME, REPAIR_HP_PER_TICK, RESEARCH_CONFIG, getAttackBonus, getDefenseBonus, DEATH_ANIMATION_DURATION, arePlayersHostile } from '../../constants';
 import { v4 as uuidv4 } from 'uuid';
 import { BufferedDispatch } from '../../state/batch';
-import { PathfindingManager } from '../utils/pathfinding';
+import { NavMeshManager } from '../utils/navMeshManager';
+import { getDepenetrationVector, getSeparationVector } from '../utils/physics';
+import { SpatialHash } from '../utils/spatial';
 
 // Helper to find the nearest object from a list to a given unit
 const findClosest = <T extends Unit | Building | ResourceNode>(unit: Unit, objects: T[]): T | null => {
@@ -76,6 +78,12 @@ const findAndAssignNewResource = (unit: Unit, originalResourceType: ResourceType
 export const processUnitLogic = (state: GameState, delta: number, dispatch: BufferedDispatch) => {
     const { units, resourcesNodes, buildings, players } = state;
 
+    const buildingGrid = new SpatialHash(10);
+    Object.values(buildings).forEach(b => buildingGrid.insert(b.id, b.position.x, b.position.z));
+    const unitGrid = new SpatialHash(5);
+    Object.values(units).forEach(u => unitGrid.insert(u.id, u.position.x, u.position.z));
+
+
     for (const unit of Object.values(units)) {
         // --- Death Logic ---
         if (unit.isDying) {
@@ -94,14 +102,11 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
         const unitVec = new THREE.Vector3(unit.position.x, unit.position.y, unit.position.z);
 
         // --- Pathfinding Request ---
-        // This is the single source for initiating movement. If a unit needs to move,
-        // it must have a `pathTarget` set. This logic will then request a path for it.
-        if (unit.status === UnitStatus.MOVING && unit.pathTarget && !unit.path && !unit.pathIndex && !PathfindingManager.isRequestPending(unit.id)) {
-            PathfindingManager.requestPath(unit.id, unit.position, unit.pathTarget);
+        if (unit.status === UnitStatus.MOVING && unit.pathTarget && !unit.path && !unit.pathIndex && !NavMeshManager.isRequestPending(unit.id)) {
+            NavMeshManager.requestPath(unit.id, unit.position, unit.pathTarget);
         }
         
         // A. Path Following Logic
-        // All movement is now driven by following a pre-calculated path.
         if (unit.path && unit.pathIndex !== undefined && unit.pathIndex < unit.path.length) {
             const waypoint = unit.path[unit.pathIndex];
             const currentPos = new THREE.Vector3(unit.position.x, 0, unit.position.z);
@@ -152,7 +157,15 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                 // Move towards current waypoint
                 const speed = UNIT_CONFIG[unit.unitType].speed;
                 const vectorToTarget = new THREE.Vector3().subVectors(targetPos, currentPos).normalize();
-                const moveVector = vectorToTarget.multiplyScalar(speed * delta);
+                
+                // --- Simple Unit-Unit Separation ---
+                const nearbyUnitIds = unitGrid.queryNeighbors(unit.position.x, unit.position.z);
+                const nearbyUnits = nearbyUnitIds.map(id => units[id]).filter(Boolean) as Unit[];
+                const separationVector = getSeparationVector(unit, nearbyUnits);
+                separationVector.multiplyScalar(speed * 0.5); // Adjust strength of separation
+
+                const moveVector = new THREE.Vector3().add(vectorToTarget).add(separationVector).normalize().multiplyScalar(speed * delta);
+
                 const nextPos = currentPos.clone().add(moveVector);
                 dispatch({ type: 'UPDATE_UNIT', payload: { id: unit.id, position: { x: nextPos.x, y: 0, z: nextPos.z } } });
             }
@@ -244,8 +257,10 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                 const dz = unit.position.z - building.position.z;
                 const distanceSq = dx * dx + dz * dz;
                 const buildingSize = COLLISION_DATA.BUILDINGS[building.buildingType];
-                const unitRadius = COLLISION_DATA.UNITS[unit.unitType].radius;
-                const requiredDistance = Math.max(buildingSize.width / 2, buildingSize.depth / 2) + unitRadius + 1.5;
+                const buildingRadius = Math.max(buildingSize.width, buildingSize.depth) / 2;
+                const workerInteractionRange = UNIT_CONFIG[UnitType.WORKER].attackRange;
+                const requiredDistance = buildingRadius + workerInteractionRange;
+
                 if (distanceSq > requiredDistance * requiredDistance) {
                     dispatch({ type: 'COMMAND_UNIT', payload: { unitId: unit.id, targetPosition: building.position, targetId: building.id } });
                     continue;
@@ -282,8 +297,10 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                 const dz = unit.position.z - building.position.z;
                 const distanceSq = dx * dx + dz * dz;
                 const buildingSize = COLLISION_DATA.BUILDINGS[building.buildingType];
-                const unitRadius = COLLISION_DATA.UNITS[unit.unitType].radius;
-                const requiredDistance = Math.max(buildingSize.width / 2, buildingSize.depth / 2) + unitRadius + 1.5;
+                const buildingRadius = Math.max(buildingSize.width, buildingSize.depth) / 2;
+                const workerInteractionRange = UNIT_CONFIG[UnitType.WORKER].attackRange;
+                const requiredDistance = buildingRadius + workerInteractionRange;
+                
                 if (distanceSq > requiredDistance * requiredDistance) {
                     dispatch({ type: 'COMMAND_UNIT', payload: { unitId: unit.id, targetPosition: building.position, targetId: building.id } });
                     continue;
@@ -308,6 +325,36 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                     dispatch({ type: 'UPDATE_UNIT', payload: { id: unit.id, finalDestination: undefined } });
                 }
             }
+        }
+
+        // --- Corrective Physics: Depenetration from buildings ---
+        const nearbyBuildingIds = buildingGrid.queryNeighbors(unit.position.x, unit.position.z);
+        let totalPushX = 0;
+        let totalPushZ = 0;
+
+        for (const buildingId of nearbyBuildingIds) {
+            const building = buildings[buildingId];
+            if (building) {
+                const pushVector = getDepenetrationVector(unit, building);
+                if (pushVector) {
+                    totalPushX += pushVector.x;
+                    totalPushZ += pushVector.z;
+                }
+            }
+        }
+
+        if (totalPushX !== 0 || totalPushZ !== 0) {
+            dispatch({
+                type: 'UPDATE_UNIT',
+                payload: {
+                    id: unit.id,
+                    position: {
+                        x: unit.position.x + totalPushX,
+                        y: unit.position.y,
+                        z: unit.position.z + totalPushZ,
+                    },
+                }
+            });
         }
     }
 };

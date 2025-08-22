@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { GameState, UnitStatus, Unit, GameObjectType, UnitStance, Building, FloatingText, UnitType } from '../../types';
-import { UNIT_CONFIG, arePlayersHostile, getAttackBonus, getDefenseBonus } from '../../constants';
+import { UNIT_CONFIG, arePlayersHostile, getAttackBonus, getDefenseBonus, COLLISION_DATA } from '../../constants';
 import { v4 as uuidv4 } from 'uuid';
 import { BufferedDispatch } from '../../state/batch';
 
@@ -58,7 +58,16 @@ export const processCombatLogic = (state: GameState, delta: number, dispatch: Bu
 
             const targetVec = new THREE.Vector3(target.position.x, 0, target.position.z);
             const distanceSq = unitVec.distanceToSquared(targetVec);
-            const attackRangeSq = unit.attackRange ** 2;
+            
+            let effectiveAttackRange = unit.attackRange;
+            if (target.type === GameObjectType.BUILDING) {
+                const buildingSize = COLLISION_DATA.BUILDINGS[target.buildingType];
+                // Use half of the largest dimension as a pseudo-radius
+                const buildingRadius = Math.max(buildingSize.width, buildingSize.depth) / 2;
+                effectiveAttackRange += buildingRadius;
+            }
+            const attackRangeSq = effectiveAttackRange ** 2;
+
 
             if (distanceSq <= attackRangeSq) {
                 // In range, stop moving

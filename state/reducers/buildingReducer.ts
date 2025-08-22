@@ -1,6 +1,8 @@
 import { v4 as uuidv4 } from 'uuid';
+import * as THREE from 'three';
 import { GameState, Action, Building, GameObjectType, UnitType, UnitStatus, BuildingType } from '../../types';
 import { BUILDING_CONFIG, UNIT_CONFIG, TOWER_UPGRADE_CONFIG, COLLISION_DATA } from '../../constants';
+import { NavMeshManager } from '../../hooks/utils/navMeshManager';
 
 
 export function buildingReducer(state: GameState, action: Action): GameState {
@@ -49,10 +51,59 @@ export function buildingReducer(state: GameState, action: Action): GameState {
 
             const updatedUnits = { ...state.units };
             const buildingSize = COLLISION_DATA.BUILDINGS[type];
+
+            // --- Eject any units trapped by the new building foundation ---
+            const buildingBox = {
+                minX: position.x - buildingSize.width / 2,
+                maxX: position.x + buildingSize.width / 2,
+                minZ: position.z - buildingSize.depth / 2,
+                maxZ: position.z + buildingSize.depth / 2,
+            };
+
+            Object.values(state.units).forEach(unit => {
+                if (
+                    !unit.isDying &&
+                    unit.position.x > buildingBox.minX && unit.position.x < buildingBox.maxX &&
+                    unit.position.z > buildingBox.minZ && unit.position.z < buildingBox.maxZ
+                ) {
+                    // This unit is trapped. Find an escape position.
+                    const buildingCenter = new THREE.Vector3(position.x, 0, position.z);
+                    const unitPos = new THREE.Vector3(unit.position.x, 0, unit.position.z);
+                    const ejectVector = new THREE.Vector3().subVectors(unitPos, buildingCenter);
+            
+                    // If vector is zero (unit is at the center), pick a random direction
+                    if (ejectVector.lengthSq() < 0.01) {
+                        ejectVector.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize();
+                    } else {
+                        ejectVector.normalize();
+                    }
+            
+                    const unitRadius = COLLISION_DATA.UNITS[unit.unitType].radius;
+                    const ejectDistance = Math.max(buildingSize.width / 2, buildingSize.depth / 2) + unitRadius + 0.5;
+                    const escapePos = buildingCenter.clone().add(ejectVector.multiplyScalar(ejectDistance));
+            
+                    // Update the unit to move it out of the way. This is a high-priority command.
+                    // If this unit is a builder, its build task will be correctly reassigned below.
+                    updatedUnits[unit.id] = {
+                        ...unit,
+                        status: UnitStatus.MOVING,
+                        pathTarget: { x: escapePos.x, y: 0, z: escapePos.z },
+                        targetId: undefined,
+                        buildTask: undefined,
+                        repairTask: undefined,
+                        path: undefined,
+                        pathIndex: undefined,
+                        targetPosition: undefined,
+                        finalDestination: undefined,
+                    };
+                }
+            });
+
+
             const requiredDistance = Math.max(buildingSize.width / 2, buildingSize.depth / 2) + 1.5;
 
             workerIds.forEach((workerId, index) => {
-                const w = state.units[workerId];
+                const w = updatedUnits[workerId] || state.units[workerId];
                 if(w) {
                     const angle = (index / workerIds.length) * 2 * Math.PI;
                     const targetPos = {
@@ -108,6 +159,11 @@ export function buildingReducer(state: GameState, action: Action): GameState {
                 const newBuildings = { ...state.buildings };
                 delete newBuildings[id];
 
+                // If the building was fully constructed, remove its navmesh obstacle
+                if (originalBuilding.constructionProgress === undefined) {
+                    NavMeshManager.removeObstacle(originalBuilding);
+                }
+
                 const updatedUnits = { ...state.units };
                 Object.keys(updatedUnits).forEach(unitId => {
                     const unit = updatedUnits[unitId];
@@ -160,6 +216,9 @@ export function buildingReducer(state: GameState, action: Action): GameState {
 
             if (newProgress >= 1) {
                 const finalBuilding = { ...building, hp: building.maxHp, constructionProgress: undefined };
+                
+                // Add navmesh obstacle for the completed building
+                NavMeshManager.addObstacle(finalBuilding);
                 
                 let nextState: GameState = { ...state };
 

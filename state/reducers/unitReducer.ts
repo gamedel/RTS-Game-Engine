@@ -69,7 +69,10 @@ export function unitReducer(state: GameState, action: Action): GameState {
                 const numSlots = 8;
                 const resourceCenter = new THREE.Vector3(resource.position.x, 0, resource.position.z);
                 const otherWorkersAtResource = Object.values(state.units).filter(u => u.id !== unitId && u.unitType === UnitType.WORKER && (u.targetId === resource.id || u.gatherTargetId === resource.id));
-                const occupiedPositions = otherWorkersAtResource.map(u => u.targetPosition ? new THREE.Vector3(u.targetPosition.x, u.targetPosition.y, u.targetPosition.z) : new THREE.Vector3(u.position.x, u.position.y, u.position.z));
+                const occupiedPositions = otherWorkersAtResource.map(u => {
+                    const target = u.pathTarget || u.targetPosition; // Use pathTarget first
+                    return target ? new THREE.Vector3(target.x, target.y, target.z) : new THREE.Vector3(u.position.x, u.position.y, u.position.z)
+                });
                 let bestSlot: THREE.Vector3 | null = null;
                 let minDistanceSq = Infinity;
                 for (let i = 0; i < numSlots; i++) {
@@ -332,6 +335,54 @@ export function unitReducer(state: GameState, action: Action): GameState {
                 }
             });
             return { ...state, units: updatedUnits };
+        }
+        case 'DEBUG_SPAWN_UNITS': {
+            const { playerId, unitType, count, position } = action.payload;
+            const player = state.players[playerId];
+            if (!player) return state;
+
+            const config = UNIT_CONFIG[unitType];
+            const isCombatUnit = unitType !== UnitType.WORKER;
+            
+            const newUnits = { ...state.units };
+            const spawnRadius = 8; // Radius around the given position
+
+            for (let i = 0; i < count; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const radius = spawnRadius + Math.random() * 5;
+                const spawnPosition = {
+                    x: position.x + Math.cos(angle) * radius,
+                    y: 0,
+                    z: position.z + Math.sin(angle) * radius,
+                };
+
+                const newUnitId = uuidv4();
+                const completeUnit: Unit = {
+                    id: newUnitId,
+                    type: GameObjectType.UNIT,
+                    unitType: unitType,
+                    position: spawnPosition,
+                    status: UnitStatus.IDLE,
+                    hp: config.hp,
+                    playerId: playerId,
+                    maxHp: config.hp,
+                    attackDamage: config.attackDamage,
+                    attackSpeed: config.attackSpeed,
+                    attackRange: config.attackRange,
+                    defense: config.defense,
+                    stance: isCombatUnit ? UnitStance.AGGRESSIVE : UnitStance.HOLD_GROUND,
+                    isHarvesting: false,
+                    harvestingResourceType: undefined,
+                };
+                newUnits[newUnitId] = completeUnit;
+            }
+            
+            const updatedPopulation = { ...player.population, current: player.population.current + count };
+            
+            const newPlayers = [...state.players];
+            newPlayers[playerId] = { ...player, population: updatedPopulation };
+
+            return { ...state, units: newUnits, players: newPlayers };
         }
         default:
             return state;

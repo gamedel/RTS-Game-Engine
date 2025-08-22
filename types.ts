@@ -298,4 +298,5 @@ export type Action =
   | { type: 'PAUSE_GAME' }
   | { type: 'RESUME_GAME' }
   | { type: 'BATCH_UPDATE'; payload: BatchUpdatePayload }
+  | { type: 'DEBUG_SPAWN_UNITS'; payload: { playerId: number, unitType: UnitType, count: number, position: Vector3 } }
   | { type: 'UPDATE_TRAINING_PROGRESS'; payload: { buildingId: string, progress: number } };

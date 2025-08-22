@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { GameState, Unit, UnitStatus } from '../../types';
 import { BufferedDispatch } from '../../state/batch';
-import { PathfindingManager } from '../utils/pathfinding';
+import { NavMeshManager } from './navMeshManager';
 
 const NEAR_DEST_SNAP_DISTANCE = 18;   // когда центр группы ближе 18u к цели — можно «доприлизать» строй
 const MIN_REISSUE_DELTA_SQ = 0.5 * 0.5; // не перезаём приказ, если цель почти не отличается (<0.5u)
@@ -56,7 +56,7 @@ export function updateSquadFormations(state: GameState, dispatch: BufferedDispat
 
     ordered.forEach((u, i) => {
       if (u.status === UnitStatus.ATTACKING) return; // атакующих не дёргаем
-      if (PathfindingManager.isRequestPending(u.id)) return; // не перебиваем вычисляющийся путь
+      if (NavMeshManager.isRequestPending(u.id)) return; // не перебиваем вычисляющийся путь
 
       const r = Math.floor(i / cols);
       const c = i % cols;

@@ -61,7 +61,7 @@ const ArcherIcon = ({ style }: { style?: React.CSSProperties }) => (
     </svg>
 );
 
-const CavalryIcon = ({ style }: { style?: React.CSSProperties }) => (
+export const CavalryIcon = ({ style }: { style?: React.CSSProperties }) => (
     <svg style={style} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M3.5 21 5 17c.2-1.2.8-2.3 1.5-3.3" />
         <path d="m19 21-1-4c-.2-1.2-.8-2.3-1.5-3.3" />

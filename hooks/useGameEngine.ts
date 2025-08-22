@@ -8,7 +8,8 @@ import { processProjectileLogic } from './gameLogic/projectileLogic';
 import { processCombatLogic } from './gameLogic/combatLogic';
 import { processAiLogic } from './gameLogic/aiLogic';
 import { createBufferedDispatch } from '../state/batch';
-import { PathfindingManager } from './utils/pathfinding';
+import { NavMeshManager } from './utils/navMeshManager';
+import { updateSquadFormations } from './utils/formations';
 
 
 const FIXED_TIME_STEP = 1 / 60.0;
@@ -27,12 +28,6 @@ export const useGameEngine = (gameState: GameState, dispatch: React.Dispatch<Act
   
   const { d: bufferedDispatch, flush } = useMemo(() => createBufferedDispatch(dispatch), [dispatch]);
 
-  // Init pathfinding manager
-  useEffect(() => {
-    PathfindingManager.init(dispatch);
-    return () => PathfindingManager.terminate();
-  }, [dispatch]);
-
   useFrame((_, delta) => {
     // FPS calculation
     frames.current++;
@@ -45,10 +40,10 @@ export const useGameEngine = (gameState: GameState, dispatch: React.Dispatch<Act
 
     const state = gameStateRef.current;
     if (state.gameStatus !== 'playing') return;
+    if (!NavMeshManager.isReady()) return; // Don't run game logic until navmesh is built
 
-    // --- Pathfinding Grid Update & Queue Processing ---
-    PathfindingManager.setGrid(state.buildings, state.resourcesNodes);
-    PathfindingManager.processQueue();
+    // --- Pathfinding Queue Processing ---
+    NavMeshManager.processQueue();
 
     // --- Fixed Time Step Logic ---
     const clampedDelta = Math.min(delta, 0.1); 
@@ -59,6 +54,7 @@ export const useGameEngine = (gameState: GameState, dispatch: React.Dispatch<Act
         
         const currentState = gameStateRef.current;
 
+        updateSquadFormations(currentState, bufferedDispatch);
         processUnitLogic(currentState, FIXED_TIME_STEP, bufferedDispatch);
         processCombatLogic(currentState, FIXED_TIME_STEP, bufferedDispatch);
         processBuildingLogic(currentState, FIXED_TIME_STEP, bufferedDispatch);

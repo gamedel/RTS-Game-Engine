@@ -165,8 +165,8 @@ export const InstancedRenderer: React.FC<{ gameState: GameState, selectedIds: Se
                 if (unit.path && unit.pathIndex !== undefined && unit.pathIndex < unit.path.length) {
                     const waypoint = unit.path[unit.pathIndex];
                     lookAtTargetVec = new THREE.Vector3(waypoint.x, 0, waypoint.z);
-                } else if (unit.targetPosition) {
-                    lookAtTargetVec = new THREE.Vector3(unit.targetPosition.x, 0, unit.targetPosition.z);
+                } else if (unit.pathTarget) {
+                    lookAtTargetVec = new THREE.Vector3(unit.pathTarget.x, 0, unit.pathTarget.z);
                 } else if (unit.targetId) {
                      const target = gameState.units[unit.targetId] || gameState.buildings[unit.targetId] || gameState.resourcesNodes[unit.targetId];
                      if (target) lookAtTargetVec = new THREE.Vector3(target.position.x, 0, target.position.z);
@@ -286,6 +286,7 @@ export const InstancedRenderer: React.FC<{ gameState: GameState, selectedIds: Se
         <>
             {Object.entries(unitsByType).map(([type, units]) => (
                 <instancedMesh
+                    frustumCulled={false}
                     key={type}
                     ref={unitMeshes[type as UnitType]}
                     args={[geometries[type as UnitType], materials.unit, units.length]}
@@ -293,16 +294,19 @@ export const InstancedRenderer: React.FC<{ gameState: GameState, selectedIds: Se
                 />
             ))}
             <instancedMesh
+                frustumCulled={false}
                 ref={selectionRingMesh}
                 args={[geometries.selectionRing, materials.selectionRing, selectedObjects.length]}
                 count={selectedObjects.length}
             />
             <instancedMesh
+                frustumCulled={false}
                 ref={healthBarBgMesh}
                 args={[geometries.healthBar, materials.healthBarBg, unitsWithHealthBars.length]}
                 count={unitsWithHealthBars.length}
             />
             <instancedMesh
+                frustumCulled={false}
                 ref={healthBarFgMesh}
                 args={[geometries.healthBar, null, unitsWithHealthBars.length]}
                 count={unitsWithHealthBars.length}
