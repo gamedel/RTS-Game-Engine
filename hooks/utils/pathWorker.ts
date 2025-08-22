@@ -2,6 +2,7 @@
 import { Grid, JumpPointFinder, DiagonalMovement } from 'pathfinding';
 
 let gridMatrix: number[][] | null = null;
+let baseGrid: Grid | null = null;
 const finder = new JumpPointFinder({ diagonalMovement: DiagonalMovement.IfAtMostOneObstacle });
 
 function clampToGrid(node: { x: number; y: number }, W: number, H: number) {
@@ -39,9 +40,10 @@ self.onmessage = (e: MessageEvent) => {
   const data = e.data as any;
   if (data.type === 'setGrid') {
     gridMatrix = data.grid as number[][];
+    baseGrid = new Grid(gridMatrix);
     (self as any).postMessage({ type: 'gridReady' });
     return;
-  } else if (data.type === 'findPath' && gridMatrix) {
+  } else if (data.type === 'findPath' && gridMatrix && baseGrid) {
     const { id, start, end } = data;
     const H = gridMatrix.length;
     const W = gridMatrix[0]?.length || 0;
@@ -70,7 +72,7 @@ self.onmessage = (e: MessageEvent) => {
       }
     }
 
-    const grid = new Grid(gridMatrix);
+    const grid = baseGrid.clone();
     const rawPath = finder.findPath(s.x, s.y, t.x, t.y, grid);
     (self as any).postMessage({ type: 'path', id, path: rawPath });
   }

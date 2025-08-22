@@ -3,7 +3,7 @@ import { GameState, Action, UnitStatus, ResourceType, UnitType, Unit, GameObject
 import { UNIT_CONFIG, COLLISION_DATA, BUILDING_CONFIG, REPAIR_TICK_TIME, REPAIR_HP_PER_TICK, RESEARCH_CONFIG, getAttackBonus, getDefenseBonus, DEATH_ANIMATION_DURATION, arePlayersHostile } from '../../constants';
 import { v4 as uuidv4 } from 'uuid';
 import { BufferedDispatch } from '../../state/batch';
-import { PathfindingManager } from '../utils/pathfinding';
+import { PathfindingManager, BUILDING_PADDING } from '../utils/pathfinding';
 
 // Helper to find the nearest object from a list to a given unit
 const findClosest = <T extends Unit | Building | ResourceNode>(unit: Unit, objects: T[]): T | null => {
@@ -286,8 +286,7 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                 const dz = unit.position.z - building.position.z;
                 const distanceSq = dx * dx + dz * dz;
                 const buildingSize = COLLISION_DATA.BUILDINGS[building.buildingType];
-                const unitRadius = COLLISION_DATA.UNITS[unit.unitType].radius;
-                const requiredDistance = Math.max(buildingSize.width / 2, buildingSize.depth / 2) + unitRadius + 1.5;
+                const requiredDistance = Math.max(buildingSize.width / 2, buildingSize.depth / 2) + BUILDING_PADDING + 0.05;
                 if (distanceSq > requiredDistance * requiredDistance) {
                     dispatch({ type: 'COMMAND_UNIT', payload: { unitId: unit.id, targetPosition: building.position, targetId: building.id } });
                     continue;
@@ -324,8 +323,7 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                 const dz = unit.position.z - building.position.z;
                 const distanceSq = dx * dx + dz * dz;
                 const buildingSize = COLLISION_DATA.BUILDINGS[building.buildingType];
-                const unitRadius = COLLISION_DATA.UNITS[unit.unitType].radius;
-                const requiredDistance = Math.max(buildingSize.width / 2, buildingSize.depth / 2) + unitRadius + 1.5;
+                const requiredDistance = Math.max(buildingSize.width / 2, buildingSize.depth / 2) + BUILDING_PADDING + 0.05;
                 if (distanceSq > requiredDistance * requiredDistance) {
                     dispatch({ type: 'COMMAND_UNIT', payload: { unitId: unit.id, targetPosition: building.position, targetId: building.id } });
                     continue;

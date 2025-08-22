@@ -12,7 +12,8 @@ const GRID_OFFSET = GRID_SIZE / 2;
 const MAX_UNIT_RADIUS = Math.max(
     ...Object.values(COLLISION_DATA.UNITS).map((u: any) => u.radius)
 );
-const BUILDING_PADDING = MAX_UNIT_RADIUS + 0.5;
+// Exported so other modules can use the same obstacle padding
+export const BUILDING_PADDING = MAX_UNIT_RADIUS + 0.5;
 
 // --- Helper Functions ---
 const toGridCoords = (pos: Vector3) => ({
@@ -76,26 +77,21 @@ export function getBuildingApproachPoint(
     unitType: UnitType
 ): Vector3 {
     const size = COLLISION_DATA.BUILDINGS[building.buildingType];
-    const unitR = COLLISION_DATA.UNITS[unitType].radius;
-    const margin = 0.6;
+    const halfW = size.width * 0.5 + BUILDING_PADDING;
+    const halfD = size.depth * 0.5 + BUILDING_PADDING;
+    const eps = 0.08; // ensure the point lies just outside the blocked band
 
-    const halfW = size.width / 2 + unitR + margin;
-    const halfD = size.depth / 2 + unitR + margin;
+    const c = new THREE.Vector3(building.position.x, 0, building.position.z);
+    const d = new THREE.Vector3(from.x, 0, from.z).sub(c);
+    if (d.lengthSq() < 1e-6) d.set(1, 0, 0);
 
-    const center = new THREE.Vector3(building.position.x, 0, building.position.z);
-    const dir = new THREE.Vector3(from.x, 0, from.z).sub(center);
-    if (dir.lengthSq() < 1e-4) dir.set(1, 0, 0);
-    dir.normalize();
+    const k = Math.max(Math.abs(d.x) / halfW, Math.abs(d.z) / halfD);
+    const edge = c.clone().add(d.divideScalar(k));
 
-    const target = center.clone().add(
-        new THREE.Vector3(
-            THREE.MathUtils.clamp(dir.x * Math.max(Math.abs(dir.x), Math.abs(dir.z)) * halfW, -halfW, halfW),
-            0,
-            THREE.MathUtils.clamp(dir.z * Math.max(Math.abs(dir.x), Math.abs(dir.z)) * halfD, -halfD, halfD),
-        )
-    );
+    edge.x += Math.sign(edge.x - c.x) * eps;
+    edge.z += Math.sign(edge.z - c.z) * eps;
 
-    return { x: target.x, y: 0, z: target.z };
+    return { x: edge.x, y: 0, z: edge.z };
 }
 
 // --- Manager Implementation ---
@@ -158,7 +154,7 @@ export const PathfindingManager = {
 
     processQueue: () => {
         if (!worker || !gridReady) return;
-        for (let i = 0; i < 4; i++) {
+        for (let i = 0; i < 2; i++) {
             const request = requestQueue.shift();
             if (!request) break;
             const start = toGridCoords(request.startPos);

@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { GameState, Action, Building, GameObjectType, UnitType, UnitStatus, BuildingType } from '../../types';
 import { BUILDING_CONFIG, UNIT_CONFIG, TOWER_UPGRADE_CONFIG, COLLISION_DATA } from '../../constants';
+import { BUILDING_PADDING } from '../../hooks/utils/pathfinding';
 
 
 export function buildingReducer(state: GameState, action: Action): GameState {
@@ -49,16 +50,16 @@ export function buildingReducer(state: GameState, action: Action): GameState {
 
             const updatedUnits = { ...state.units };
             const buildingSize = COLLISION_DATA.BUILDINGS[type];
-            const requiredDistance = Math.max(buildingSize.width / 2, buildingSize.depth / 2) + 1.5;
+            const ring = Math.max(buildingSize.width / 2, buildingSize.depth / 2) + BUILDING_PADDING + 0.1;
 
             workerIds.forEach((workerId, index) => {
                 const w = state.units[workerId];
                 if(w) {
                     const angle = (index / workerIds.length) * 2 * Math.PI;
                     const targetPos = {
-                        x: position.x + Math.cos(angle) * requiredDistance,
+                        x: position.x + Math.cos(angle) * ring,
                         y: 0,
-                        z: position.z + Math.sin(angle) * requiredDistance
+                        z: position.z + Math.sin(angle) * ring
                     };
 
                     updatedUnits[workerId] = {
