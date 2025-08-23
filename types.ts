@@ -116,7 +116,7 @@ export interface Unit extends BaseGameObject {
   defense: number;
   attackCooldown?: number; // Time until next attack
   // Stuck detection
-  lastPositionCheck?: { pos: Vector3, time: number };
+  lastPositionCheck?: { pos: Vector3; time: number };
   // Death animation
   isDying?: boolean;
   deathTime?: number;

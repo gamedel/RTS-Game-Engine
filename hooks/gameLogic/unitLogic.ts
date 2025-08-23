@@ -85,6 +85,30 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
 
 
     for (const unit of Object.values(units)) {
+        // --- Stuck Detection Logic ---
+        const now = performance.now();
+        if (unit.lastPositionCheck === undefined) {
+            dispatch({
+                type: 'UPDATE_UNIT',
+                payload: { id: unit.id, lastPositionCheck: { pos: unit.position, time: now } }
+            });
+        } else {
+            if (now - unit.lastPositionCheck.time > 700) {
+                const dx = unit.position.x - unit.lastPositionCheck.pos.x;
+                const dz = unit.position.z - unit.lastPositionCheck.pos.z;
+                const movedSq = dx * dx + dz * dz;
+
+                if ((unit.status === UnitStatus.MOVING || !!unit.path) && unit.pathTarget && movedSq < 0.1 * 0.1) {
+                    NavMeshManager.requestPath(unit.id, unit.position, unit.pathTarget);
+                }
+
+                dispatch({
+                    type: 'UPDATE_UNIT',
+                    payload: { id: unit.id, lastPositionCheck: { pos: unit.position, time: now } }
+                });
+            }
+        }
+        
         // --- Death Logic ---
         if (unit.isDying) {
             if (Date.now() - (unit.deathTime || 0) > DEATH_ANIMATION_DURATION) {
@@ -111,7 +135,7 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
             const waypoint = unit.path[unit.pathIndex];
             const currentPos = new THREE.Vector3(unit.position.x, 0, unit.position.z);
             const targetPos = new THREE.Vector3(waypoint.x, 0, waypoint.z);
-            const WAYPOINT_REACHED_DISTANCE_SQ = 1.5 * 1.5;
+            const WAYPOINT_REACHED_DISTANCE_SQ = 2.0 * 2.0;
 
             if (currentPos.distanceToSquared(targetPos) < WAYPOINT_REACHED_DISTANCE_SQ) {
                 const newPathIndex = unit.pathIndex + 1;
@@ -154,20 +178,13 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                     dispatch({ type: 'UPDATE_UNIT', payload: { id: unit.id, pathIndex: newPathIndex } });
                 }
             } else {
-                // Move towards current waypoint
-                const speed = UNIT_CONFIG[unit.unitType].speed;
-                const vectorToTarget = new THREE.Vector3().subVectors(targetPos, currentPos).normalize();
-                
-                // --- Simple Unit-Unit Separation ---
-                const nearbyUnitIds = unitGrid.queryNeighbors(unit.position.x, unit.position.z);
-                const nearbyUnits = nearbyUnitIds.map(id => units[id]).filter(Boolean) as Unit[];
-                const separationVector = getSeparationVector(unit, nearbyUnits);
-                separationVector.multiplyScalar(speed * 0.5); // Adjust strength of separation
-
-                const moveVector = new THREE.Vector3().add(vectorToTarget).add(separationVector).normalize().multiplyScalar(speed * delta);
-
-                const nextPos = currentPos.clone().add(moveVector);
-                dispatch({ type: 'UPDATE_UNIT', payload: { id: unit.id, position: { x: nextPos.x, y: 0, z: nextPos.z } } });
+                const step = Math.max(UNIT_CONFIG[unit.unitType].speed * delta, 0.01);
+                const next = NavMeshManager.advanceOnNav(
+                  { x: unit.position.x, y: 0, z: unit.position.z },
+                  { x: waypoint.x,      y: 0, z: waypoint.z },
+                  step
+                );
+                dispatch({ type: 'UPDATE_UNIT', payload: { id: unit.id, position: next } });
             }
         } 
 

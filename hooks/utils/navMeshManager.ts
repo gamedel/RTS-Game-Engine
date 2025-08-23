@@ -3,6 +3,54 @@ import { generateSoloNavMesh, generateTiledNavMesh, GenerateSoloNavMeshResult, G
 import { Building, ResourceNode, Vector3, Action, UnitStatus } from '../../types';
 import { COLLISION_DATA } from '../../constants';
 
+const d2 = (a: Vector3, b: Vector3) => {
+    const dx = a.x - b.x;
+    const dz = a.z - b.z;
+    return dx * dx + dz * dz;
+};
+
+const looksZero = (p: Vector3) => Math.abs(p.x) < 1e-6 && Math.abs(p.z) < 1e-6;
+
+function extractPoints(sp: any): Vector3[] {
+  const out: Vector3[] = [];
+  if (!sp) return out;
+
+  // Прямой Float32Array [x,y,z,x,y,z,...]
+  if (ArrayBuffer.isView(sp) && 'length' in sp) {
+    const a = sp as Float32Array | number[];
+    for (let i = 0; i + 2 < a.length; i += 3) out.push({ x: +a[i], y: 0, z: +a[i + 2] });
+    return out;
+  }
+
+  if (Array.isArray(sp) && sp.length) {
+    // [ [x,y,z], ... ]
+    if (Array.isArray(sp[0])) {
+      for (const v of sp as number[][]) out.push({ x: +v[0], y: 0, z: +v[2] });
+      return out;
+    }
+    // [{x,y,z} ...] или [{pos: Float32Array|number[]}, ...]
+    if (typeof sp[0] === 'object') {
+      for (const p of sp as any[]) {
+        if (p) {
+          if (ArrayBuffer.isView(p.pos) || Array.isArray(p.pos)) {
+            out.push({ x: +p.pos[0], y: 0, z: +p.pos[2] });
+          } else if (Number.isFinite(p.x) && Number.isFinite(p.z)) {
+            out.push({ x: +p.x, y: 0, z: +p.z });
+          }
+        }
+      }
+      return out;
+    }
+    // [x,y,z,x,y,z,...] как number[]
+    if (typeof sp[0] === 'number') {
+      const a = sp as number[];
+      for (let i = 0; i + 2 < a.length; i += 3) out.push({ x: +a[i], y: 0, z: +a[i + 2] });
+      return out;
+    }
+  }
+  return out;
+}
+
 let navMesh: any;
 let navMeshQuery: NavMeshQuery | null = null;
 let dispatchRef: React.Dispatch<Action> | null = null;
@@ -31,54 +79,105 @@ const rcConfig = {
   detailSampleMaxError: 1.0,
 };
 
-const getSourceGeometries = (buildings: Record<string, Building>, resourcesNodes: Record<string, ResourceNode>) => {
+const getSourceGeometries = (
+  buildings: Record<string, Building>,
+  resourcesNodes: Record<string, ResourceNode>
+) => {
   const positions: number[] = [];
   const indices: number[] = [];
 
-  const addBox = (pos: Vector3, size: { width: number; depth: number }, height: number) => {
-    const x = pos.x, y = pos.y, z = pos.z;
-    const w = size.width / 2, d = size.depth / 2, h = height;
+  // ---------------- helpers ----------------
+  const pushQuad = (
+    ax:number, ay:number, az:number,
+    bx:number, by:number, bz:number,
+    cx:number, cy:number, cz:number,
+    dx:number, dy:number, dz:number
+  ) => {
     const base = positions.length / 3;
-
     positions.push(
-      x - w, y, z - d,  x + w, y, z - d,  x + w, y, z + d,  x - w, y, z + d,
-      x - w, y + h, z - d,  x + w, y + h, z - d,  x + w, y + h, z + d,  x - w, y + h, z + d
+      ax, ay, az,  bx, by, bz,  cx, cy, cz,
+      ax, ay, az,  cx, cy, cz,  dx, dy, dz
     );
-    indices.push(
-      base+0, base+1, base+2,  base+0, base+2, base+3,
-      base+4, base+5, base+6,  base+4, base+6, base+7,
-      base+0, base+4, base+7,  base+0, base+7, base+3,
-      base+1, base+5, base+6,  base+1, base+6, base+2,
-      base+3, base+2, base+6,  base+3, base+6, base+7,
-      base+0, base+1, base+5,  base+0, base+5, base+4
-    );
+    indices.push(base+0, base+1, base+2, base+3, base+4, base+5);
   };
 
-  const addGroundSlab = (size: number, height = 2) => {
-    addBox({ x: 0, y: -height / 2, z: 0 }, { width: size, depth: size }, height);
-  };
+  type Box = { minX:number; maxX:number; minZ:number; maxZ:number };
 
-  const groundSize = 300;
-  addGroundSlab(groundSize, 2);
-
-
-  // buildings
-  Object.values(buildings).forEach(b => {
-    if (b.constructionProgress === undefined) {
-      const sz = COLLISION_DATA.BUILDINGS[b.buildingType];
-      if (sz) addBox(b.position, sz, 10);
-    }
+  const expandAABB = (minX:number, maxX:number, minZ:number, maxZ:number, e:number): Box => ({
+    minX: minX - e, maxX: maxX + e, minZ: minZ - e, maxZ: maxZ + e
   });
 
-  // resources
+  const boxOverlap = (a:Box, b:Box) =>
+    a.minX < b.maxX && a.maxX > b.minX && a.minZ < b.maxZ && a.maxZ > b.minZ;
+
+  // ---------------- collect obstacle AABBs ----------------
+  // Расширяем под радиус агента, чтобы путь не прилипал к стене.
+  const agentExpand = rcConfig.walkableRadius + 0.2; // = 0.6 + 0.2 = 0.8
+
+  const obstacles: Box[] = [];
+
+  // здания (только построенные)
+  Object.values(buildings).forEach(b => {
+    if (b.constructionProgress !== undefined) return;
+    const sz = COLLISION_DATA.BUILDINGS[b.buildingType];
+    if (!sz) return;
+    const halfW = sz.width * 0.5;
+    const halfD = sz.depth * 0.5;
+    obstacles.push(
+      expandAABB(
+        b.position.x - halfW, b.position.x + halfW,
+        b.position.z - halfD, b.position.z + halfD,
+        agentExpand
+      )
+    );
+  });
+
+  // ресурсы
   Object.values(resourcesNodes).forEach(r => {
     const sz = COLLISION_DATA.RESOURCES[r.resourceType];
-    if (sz) addBox(r.position, { width: sz.radius * 2, depth: sz.radius * 2 }, 10);
+    if (!sz) return;
+    const half = sz.radius;
+    obstacles.push(
+      expandAABB(
+        r.position.x - half, r.position.x + half,
+        r.position.z - half, r.position.z + half,
+        agentExpand
+      )
+    );
   });
+
+  // ---------------- ground with holes ----------------
+  const groundSize = 300;
+  const s = groundSize / 2;
+
+  // Размер «плитки» земли. 2.0 — хорошее соотношение между качеством и числом треугольников.
+  // Можно поставить 1.0 для ещё более точного края дыр (но будет больше треугольников).
+  const CELL = 2.0;
+
+  for (let x = -s; x < s; x += CELL) {
+    for (let z = -s; z < s; z += CELL) {
+      const cell: Box = { minX: x, maxX: x + CELL, minZ: z, maxZ: z + CELL };
+
+      // если клетка пересекается с любым препятствием — пропускаем (вырезаем дыру)
+      let blocked = false;
+      for (let i = 0; i < obstacles.length; i++) {
+        if (boxOverlap(cell, obstacles[i])) { blocked = true; break; }
+      }
+      if (blocked) continue;
+
+      // иначе кладём два треугольника плоскости на y=0
+      pushQuad(
+        x, 0, z,
+        x + CELL, 0, z,
+        x + CELL, 0, z + CELL,
+        x, 0, z + CELL
+      );
+    }
+  }
 
   return {
     positions: new Float32Array(positions),
-    indices: new Uint32Array(indices),
+    indices:   new Uint32Array(indices),
   };
 };
 
@@ -160,6 +259,129 @@ export const NavMeshManager = {
 
   isRequestPending: (unitId: string) => pendingRequests.has(unitId),
 
+  projectMove: (from: Vector3, to: Vector3): Vector3 => {
+    if (!navMeshQuery) return to;
+  
+    const halfExtents = {
+      x: rcConfig.walkableRadius + 0.1,
+      y: rcConfig.walkableHeight,
+      z: rcConfig.walkableRadius + 0.1,
+    };
+  
+    // 1) Всегда сначала "пришпиливаем" старт к мешу
+    const sRes: any = navMeshQuery.findClosestPoint(from, { halfExtents });
+    if (!sRes?.point) return from;
+    const s = { x: sRes.point.x, y: 0, z: sRes.point.z };
+  
+    // 2) Пробуем пройти вдоль поверхности от s к to
+    try {
+      const q: any = (navMeshQuery as any).moveAlongSurface
+        ? (navMeshQuery as any).moveAlongSurface(s, to, { halfExtents })
+        : null;
+  
+      const p = q?.result || q?.point || q?.position || q;
+      if (p && Number.isFinite(p.x) && Number.isFinite(p.z)) {
+        return { x: p.x, y: 0, z: p.z };
+      }
+    } catch { /* no-op */ }
+  
+    // 3) Фолбэк: ищем ближайшую к to, но вокруг текущего шага (to близко к s)
+    const tRes: any = navMeshQuery.findClosestPoint(to, { halfExtents });
+    if (tRes?.point) return { x: tRes.point.x, y: 0, z: tRes.point.z };
+  
+    // Если совсем ничего — остаёмся на месте
+    return s;
+  },
+
+  snapToNav: (p: Vector3): Vector3 => {
+    if (!navMeshQuery) return p;
+    const halfExtents = {
+      x: rcConfig.walkableRadius + 0.1,
+      y: rcConfig.walkableHeight,
+      z: rcConfig.walkableRadius + 0.1,
+    };
+    const r: any = navMeshQuery.findClosestPoint(p, { halfExtents });
+    return r?.point ? { x: r.point.x, y: 0, z: r.point.z } : p;
+  },
+
+  safeSnap(to: Vector3, maxSnapDist: number): Vector3 {
+    if (!navMeshQuery) return to;
+  
+    const halfExtents = {
+      x: rcConfig.walkableRadius + 0.1,
+      y: rcConfig.walkableHeight,
+      z: rcConfig.walkableRadius + 0.1,
+    };
+  
+    const r: any = navMeshQuery.findClosestPoint(to, { halfExtents });
+    const q = r?.point;
+    if (!q || !Number.isFinite(q.x) || !Number.isFinite(q.z)) return to;
+  
+    const dx = q.x - to.x, dz = q.z - to.z;
+    const corr2 = dx*dx + dz*dz;
+  
+    // 1) Do not accept a clamp that is too large
+    if (corr2 > maxSnapDist * maxSnapDist) return to;
+  
+    // 2) Discard a suspicious zero if the candidate step is far away
+    if (Math.abs(q.x) < 1e-6 && Math.abs(q.z) < 1e-6) {
+      const d02 = to.x*to.x + to.z*to.z;
+      if (d02 > (maxSnapDist * maxSnapDist * 25)) return to;
+    }
+  
+    return { x: q.x, y: 0, z: q.z };
+  },
+
+  advanceOnNav(from: Vector3, to: Vector3, maxStep: number): Vector3 {
+    if (!navMeshQuery) return to;
+    const he = {
+      x: rcConfig.walkableRadius + 0.1,
+      y: rcConfig.walkableHeight,
+      z: rcConfig.walkableRadius + 0.1,
+    };
+  
+    // 1) Start point must be on the mesh
+    const sRes: any = navMeshQuery.findClosestPoint(from, { halfExtents: he });
+    const s = sRes?.point ? { x: sRes.point.x, y: 0, z: sRes.point.z } : from;
+  
+    // 2) Try to move along the surface towards the waypoint
+    let prop: any = null;
+    try {
+      prop = (navMeshQuery as any).moveAlongSurface
+        ? (navMeshQuery as any).moveAlongSurface(s, to, { halfExtents: he })
+        : null;
+    } catch { /* no-op */ }
+  
+    let p = prop?.result || prop?.point || prop?.position || prop || null;
+  
+    const capToStep = (a: Vector3, b: Vector3, step: number): Vector3 => {
+      const dx = b.x - a.x, dz = b.z - a.z;
+      const d2 = dx*dx + dz*dz;
+      if (d2 <= step*step) return { x: b.x, y: 0, z: b.z };
+      const inv = 1/Math.sqrt(Math.max(d2, 1e-12));
+      return { x: a.x + dx*inv*step, y: 0, z: a.z + dz*inv*step };
+    };
+  
+    // If moveAlongSurface gave a valid point, limit it to the step length
+    if (p && Number.isFinite(p.x) && Number.isFinite(p.z)) {
+      const limited = capToStep(s, { x: +p.x, y: 0, z: +p.z }, maxStep);
+  
+      // Protection against jumping to (0,0) with a distant target
+      const looksZero = (v: Vector3) => Math.abs(v.x) < 1e-6 && Math.abs(v.z) < 1e-6;
+      const farTarget2 = to.x*to.x + to.z*to.z;
+      if (looksZero(limited) && farTarget2 > 25*25) {
+        // Fallback: linear step + soft snap within step radius
+        const lin = capToStep(s, to, maxStep);
+        return this.safeSnap(lin, Math.max(maxStep*2, 0.5));
+      }
+      return limited;
+    }
+  
+    // 3) Fallback: linear step + soft snap
+    const lin = capToStep(s, to, maxStep);
+    return this.safeSnap(lin, Math.max(maxStep*2, 0.5));
+  },
+
   processQueue: () => {
     if (!ready || !dispatchRef) return;
 
@@ -170,67 +392,91 @@ export const NavMeshManager = {
       const { unitId, startPos, endPos } = req;
   
       try {
-        if (mode === 'fallback-line') {
+        if (mode === 'fallback-line' || !navMeshQuery) {
           dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path: [startPos, endPos], pathIndex: 0 } });
+          pendingRequests.delete(unitId);
           continue;
         }
-        if (!navMeshQuery) {
-          dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
-          continue;
+
+        const halfExtents = { x: rcConfig.walkableRadius + 0.1, y: rcConfig.walkableHeight, z: rcConfig.walkableRadius + 0.1 };
+
+        // 1) Safely clamp START point
+        const sRes: any = navMeshQuery.findClosestPoint(startPos, { halfExtents });
+        if (!sRes?.point) {
+            dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE }});
+            pendingRequests.delete(unitId);
+            continue;
         }
-  
-        const lift = (p: Vector3): Vector3 => ({ x: p.x, y: 0.5, z: p.z });
-  
-        const halfExtents = { x: 2, y: 4, z: 2 };
-        const res: any = navMeshQuery.computePath(lift(startPos), lift(endPos), { halfExtents });
+        const s = { x: sRes.point.x, y: 0, z: sRes.point.z };
+        // If clamp is too far from real start, or a suspicious zero, consider it a bad case
+        if (d2(s, startPos) > 2*2 || (looksZero(s) && d2(startPos, {x:0,y:0,z:0} as any) > 25*25)) {
+            dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE }});
+            pendingRequests.delete(unitId);
+            continue;
+        }
+
+        // 2) Safely clamp END point
+        const eRes: any = navMeshQuery.findClosestPoint(endPos, { halfExtents });
+        if (!eRes?.point) {
+            dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE }});
+            pendingRequests.delete(unitId);
+            continue;
+        }
+        const e = { x: eRes.point.x, y: 0, z: eRes.point.z };
+        // If clamp is too far from target or is a suspicious zero, don't path there
+        if (d2(e, endPos) > 6*6 || (looksZero(e) && d2(endPos, {x:0,y:0,z:0} as any) > 25*25)) {
+            dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE }});
+            pendingRequests.delete(unitId);
+            continue;
+        }
   
         let points: Vector3[] = [];
-  
-        // 1) Try straightPath (most reliable source of coordinates)
-        const sp = res?.straightPath;
-        if (sp && sp.length) {
-          if (Array.isArray(sp)) {
-            // Either an array of arrays or an array of objects
-            if (Array.isArray(sp[0])) {
-              // [[x,y,z],...]
-              points = (sp as number[][]).map(([x, _y, z]) => ({ x, y: 0, z }));
-            } else if (typeof sp[0] === 'number') {
-              // Flat Float32Array/number[]: [x,y,z,x,y,z,...]
-              const arr = sp as number[];
-              for (let i = 0; i + 2 < arr.length; i += 3) {
-                points.push({ x: arr[i], y: 0, z: arr[i + 2] });
-              }
-            } else if (typeof sp[0] === 'object' && sp[0] !== null) {
-              // [{x,y,z}, ...]
-              points = (sp as any[]).map(p => ({ x: p.x, y: 0, z: p.z }));
-            }
-          }
+        try {
+            const res: any = navMeshQuery.computePath(s, e, { halfExtents });
+            points = extractPoints(res?.straightPath);
+            if (!points.length) points = extractPoints(res?.path);
+        } catch (err) {
+            console.warn(`[NavMesh] Path computation failed for unit ${unitId}, trying to recover...`);
         }
-  
-        // 2) If straightPath is missing, the library might put coordinates in res.path
-        if (!points.length && res?.path && res.path.length) {
-          const p0 = res.path[0];
-          if (typeof p0 === 'number') {
-            // These are polyRefs, not coordinates - skip.
-          } else if (Array.isArray(p0)) {
-            points = (res.path as number[][]).map(([x, _y, z]) => ({ x, y: 0, z }));
-          } else if (typeof p0 === 'object' && p0 !== null) {
-            points = (res.path as any[]).map(p => ({ x: p.x, y: 0, z: p.z }));
-          }
-        }
-  
-        // 3) If still no coordinates, use a direct line as a fallback.
-        if (points.length < 2) {
-          points = [startPos, endPos];
-        }
-  
-        // Sanity-check: remove NaN / infinity
+
+        // --- Path Sanitization ---
         points = points.filter(p => Number.isFinite(p.x) && Number.isFinite(p.z));
-  
-        if (points.length >= 2) {
-          dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path: points, pathIndex: 0 } });
+        if (points.length) {
+          // Discard (0,0) if the target is far away
+          points = points.filter(p => !(looksZero(p) && d2(endPos, {x:0,y:0,z:0} as any) > 25*25));
+          // Discard final points that are further than 6m from the desired target
+          const MAX_END_ERR2 = 6*6;
+          while (points.length && d2(points[points.length - 1], endPos) > MAX_END_ERR2) points.pop();
+        }
+
+        if (!points.length) {
+            dispatchRef({ type:'UPDATE_UNIT', payload:{ id: unitId, pathTarget: undefined, status: UnitStatus.IDLE }});
+            pendingRequests.delete(unitId);
+            continue;
+        }
+
+        // --- Path Normalization ---
+        const START_EPS = 0.50;
+        if (points.length && d2(points[0], startPos) < START_EPS * START_EPS) {
+          points.shift();
+        }
+    
+        const SEG_EPS = 0.25;
+        if(points.length > 1) {
+            const compact: Vector3[] = [points[0]];
+            for (let i = 1; i < points.length; i++) {
+                const p = points[i];
+                if (d2(compact[compact.length - 1], p) > SEG_EPS * SEG_EPS) {
+                    compact.push(p);
+                }
+            }
+            points = compact;
+        }
+        
+        if (points.length >= 1) {
+            dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path: points, pathIndex: 0 } });
         } else {
-          dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
+            dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
         }
       } catch (e) {
         console.error('NavMesh pathfinding error for unit:', unitId, e);
