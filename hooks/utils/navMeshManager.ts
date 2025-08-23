@@ -11,6 +11,9 @@ const pendingRequests = new Set<string>();
 let ready = false;
 
 type PathRequest = { unitId: string; startPos: Vector3; endPos: Vector3; };
+type Mode = 'recast' | 'fallback-line';
+let mode: Mode = 'recast';
+
 
 const rcConfig = {
   cs: 0.3,
@@ -51,23 +54,12 @@ const getSourceGeometries = (buildings: Record<string, Building>, resourcesNodes
     );
   };
 
-  const addGroundPlane = (size: number) => {
-    const s = size / 2;
-    const base = positions.length / 3;
-    positions.push(
-      -s, 0, -s,
-       s, 0, -s,
-       s, 0,  s,
-      -s, 0,  s,
-    );
-    indices.push(
-      base + 0, base + 1, base + 2,
-      base + 0, base + 2, base + 3,
-    );
+  const addGroundSlab = (size: number, height = 2) => {
+    addBox({ x: 0, y: -height / 2, z: 0 }, { width: size, depth: size }, height);
   };
 
   const groundSize = 300;
-  addGroundPlane(groundSize);
+  addGroundSlab(groundSize, 2);
 
 
   // buildings
@@ -86,7 +78,7 @@ const getSourceGeometries = (buildings: Record<string, Building>, resourcesNodes
 
   return {
     positions: new Float32Array(positions),
-    indices: new Uint32Array(indices),
+    indices: new Int32Array(indices),
   };
 };
 
@@ -100,33 +92,33 @@ export const NavMeshManager = {
   isReady: () => ready,
 
   buildNavMesh: async (buildings: Record<string, Building>, resourcesNodes: Record<string, ResourceNode>) => {
+    mode = 'recast';
     const { positions, indices } = getSourceGeometries(buildings, resourcesNodes);
     console.log('[NavGen] verts:', positions.length / 3, 'tris:', indices.length / 3);
+
+    const cfg = { ...rcConfig };
+    const cfgVoxelized = {
+        ...cfg,
+        walkableHeight: Math.max(1, Math.ceil(cfg.walkableHeight / cfg.ch)),
+        walkableClimb: Math.max(0, Math.floor(cfg.walkableClimb / cfg.ch)),
+        walkableRadius: Math.max(0, Math.ceil(cfg.walkableRadius / cfg.cs)),
+    };
   
-    const res: GenerateSoloNavMeshResult = generateSoloNavMesh(positions, indices, rcConfig as any);
+    const res: GenerateSoloNavMeshResult = generateSoloNavMesh(positions, indices, cfgVoxelized as any);
   
-    if (!res.success) {
-      console.error('Failed to build NavMesh', res.error);
-  
-      // Fallback: ground without obstacles
-      const p: number[] = [];
-      const i: number[] = [];
-      const s = 300 / 2;
-      const base = 0;
-      p.push(-s, 0, -s, s, 0, -s, s, 0, s, -s, 0, s);
-      i.push(base + 0, base + 1, base + 2, base + 0, base + 2, base + 3);
-      const res2 = generateSoloNavMesh(new Float32Array(p), new Uint32Array(i), rcConfig as any);
-      
-      if (!res2.success) {
-        console.error('Fallback NavMesh failed', res2.error);
-        return;
-      }
-      navMesh = res2.navMesh;
-    } else {
+    if (res.success) {
       navMesh = res.navMesh;
+      navMeshQuery = new NavMeshQuery(navMesh);
+      ready = true;
+      return;
     }
   
-    navMeshQuery = new NavMeshQuery(navMesh);
+    console.error('Failed to build NavMesh', res.error);
+  
+    // Fallback to "line mode" to unblock the game
+    mode = 'fallback-line';
+    navMesh = null;
+    navMeshQuery = null;
     ready = true;
   },
 
@@ -142,13 +134,24 @@ export const NavMeshManager = {
   isRequestPending: (unitId: string) => pendingRequests.has(unitId),
 
   processQueue: () => {
-    if (!ready || !dispatchRef || !navMeshQuery) return;
+    if (!ready || !dispatchRef) return;
     const req = requestQueue.shift();
     if (!req) return;
 
     const { unitId, startPos, endPos } = req;
 
     try {
+      if (mode === 'fallback-line') {
+        // Simple straight line path
+        dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path: [startPos, endPos], pathIndex: 0 } });
+        return;
+      }
+      
+      if (!navMeshQuery) {
+        dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
+        return;
+      };
+
       const halfExtents = { x: 2, y: 4, z: 2 };
       const { success, path } = navMeshQuery.computePath(startPos, endPos, { halfExtents });
 
