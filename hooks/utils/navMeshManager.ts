@@ -1,5 +1,5 @@
 import { init, NavMeshQuery } from 'recast-navigation';
-import { generateSoloNavMesh } from 'recast-navigation/generators';
+import { generateSoloNavMesh, GenerateSoloNavMeshResult } from 'recast-navigation/generators';
 import { Building, ResourceNode, Vector3, Action, UnitStatus } from '../../types';
 import { COLLISION_DATA } from '../../constants';
 
@@ -16,16 +16,16 @@ const rcConfig = {
   cs: 0.3,
   ch: 0.2,
   walkableSlopeAngle: 60,
-  walkableHeight: 2,
-  walkableClimb: 1,
-  walkableRadius: 1,
+  walkableHeight: 1.8,
+  walkableClimb: 0.6,
+  walkableRadius: 0.6,
   maxEdgeLen: 20,
-  maxSimplificationError: 1.3,
-  minRegionArea: 8,
-  mergeRegionArea: 20,
+  maxSimplificationError: 1.0,
+  minRegionArea: 2,
+  mergeRegionArea: 10,
   maxVertsPerPoly: 6,
-  detailSampleDist: 6,
-  detailSampleMaxError: 1,
+  detailSampleDist: 3,
+  detailSampleMaxError: 0.5,
 };
 
 const getSourceGeometries = (buildings: Record<string, Building>, resourcesNodes: Record<string, ResourceNode>) => {
@@ -51,9 +51,24 @@ const getSourceGeometries = (buildings: Record<string, Building>, resourcesNodes
     );
   };
 
-  // ground
+  const addGroundPlane = (size: number) => {
+    const s = size / 2;
+    const base = positions.length / 3;
+    positions.push(
+      -s, 0, -s,
+       s, 0, -s,
+       s, 0,  s,
+      -s, 0,  s,
+    );
+    indices.push(
+      base + 0, base + 1, base + 2,
+      base + 0, base + 2, base + 3,
+    );
+  };
+
   const groundSize = 300;
-  addBox({ x: 0, y: -0.2, z: 0 }, { width: groundSize, depth: groundSize }, 0.2);
+  addGroundPlane(groundSize);
+
 
   // buildings
   Object.values(buildings).forEach(b => {
@@ -71,7 +86,7 @@ const getSourceGeometries = (buildings: Record<string, Building>, resourcesNodes
 
   return {
     positions: new Float32Array(positions),
-    indices: new Uint16Array(indices),
+    indices: new Uint32Array(indices),
   };
 };
 
@@ -86,17 +101,31 @@ export const NavMeshManager = {
 
   buildNavMesh: async (buildings: Record<string, Building>, resourcesNodes: Record<string, ResourceNode>) => {
     const { positions, indices } = getSourceGeometries(buildings, resourcesNodes);
-
-    const { success, navMesh: builtNavMesh } = generateSoloNavMesh(
-      positions, indices, rcConfig as any
-    );
-
-    if (!success || !builtNavMesh) {
-      console.error('Failed to build NavMesh');
-      return;
+    console.log('[NavGen] verts:', positions.length / 3, 'tris:', indices.length / 3);
+  
+    const res: GenerateSoloNavMeshResult = generateSoloNavMesh(positions, indices, rcConfig as any);
+  
+    if (!res.success) {
+      console.error('Failed to build NavMesh', res.error);
+  
+      // Fallback: ground without obstacles
+      const p: number[] = [];
+      const i: number[] = [];
+      const s = 300 / 2;
+      const base = 0;
+      p.push(-s, 0, -s, s, 0, -s, s, 0, s, -s, 0, s);
+      i.push(base + 0, base + 1, base + 2, base + 0, base + 2, base + 3);
+      const res2 = generateSoloNavMesh(new Float32Array(p), new Uint32Array(i), rcConfig as any);
+      
+      if (!res2.success) {
+        console.error('Fallback NavMesh failed', res2.error);
+        return;
+      }
+      navMesh = res2.navMesh;
+    } else {
+      navMesh = res.navMesh;
     }
-
-    navMesh = builtNavMesh;
+  
     navMeshQuery = new NavMeshQuery(navMesh);
     ready = true;
   },
