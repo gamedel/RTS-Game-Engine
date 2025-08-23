@@ -1,5 +1,5 @@
 import { init, NavMeshQuery } from 'recast-navigation';
-import { generateSoloNavMesh, GenerateSoloNavMeshResult } from 'recast-navigation/generators';
+import { generateSoloNavMesh, generateTiledNavMesh, GenerateSoloNavMeshResult, GenerateTiledNavMeshResult } from 'recast-navigation/generators';
 import { Building, ResourceNode, Vector3, Action, UnitStatus } from '../../types';
 import { COLLISION_DATA } from '../../constants';
 
@@ -16,19 +16,19 @@ let mode: Mode = 'recast';
 
 
 const rcConfig = {
-  cs: 0.3,
-  ch: 0.2,
+  cs: 0.35,
+  ch: 0.25,
   walkableSlopeAngle: 60,
   walkableHeight: 1.8,
   walkableClimb: 0.6,
   walkableRadius: 0.6,
-  maxEdgeLen: 20,
+  maxEdgeLen: 16,
   maxSimplificationError: 1.0,
   minRegionArea: 2,
   mergeRegionArea: 10,
   maxVertsPerPoly: 6,
-  detailSampleDist: 3,
-  detailSampleMaxError: 0.5,
+  detailSampleDist: 0,
+  detailSampleMaxError: 1.0,
 };
 
 const getSourceGeometries = (buildings: Record<string, Building>, resourcesNodes: Record<string, ResourceNode>) => {
@@ -78,7 +78,7 @@ const getSourceGeometries = (buildings: Record<string, Building>, resourcesNodes
 
   return {
     positions: new Float32Array(positions),
-    indices: new Int32Array(indices),
+    indices: new Uint32Array(indices),
   };
 };
 
@@ -95,32 +95,59 @@ export const NavMeshManager = {
     mode = 'recast';
     const { positions, indices } = getSourceGeometries(buildings, resourcesNodes);
     console.log('[NavGen] verts:', positions.length / 3, 'tris:', indices.length / 3);
-
+  
     const cfg = { ...rcConfig };
     const cfgVoxelized = {
-        ...cfg,
-        walkableHeight: Math.max(1, Math.ceil(cfg.walkableHeight / cfg.ch)),
-        walkableClimb: Math.max(0, Math.floor(cfg.walkableClimb / cfg.ch)),
-        walkableRadius: Math.max(0, Math.ceil(cfg.walkableRadius / cfg.cs)),
+      ...cfg,
+      walkableHeight: Math.max(1, Math.ceil(cfg.walkableHeight / cfg.ch)),
+      walkableClimb:  Math.max(0, Math.floor(cfg.walkableClimb  / cfg.ch)),
+      walkableRadius: Math.max(0, Math.ceil (cfg.walkableRadius / cfg.cs)),
     };
   
-    const res: GenerateSoloNavMeshResult = generateSoloNavMesh(positions, indices, cfgVoxelized as any);
+    // 1. Tiled generator - primary method
+    const tiledResult: GenerateTiledNavMeshResult = generateTiledNavMesh(positions, indices, {
+      ...cfgVoxelized,
+      tileSize: 48,
+      borderSize: 8,
+      maxTiles: 2048,
+      maxPolys: 65536,
+    } as any);
   
-    if (res.success) {
-      navMesh = res.navMesh;
+    if (!tiledResult.success) {
+      console.warn('[NavGen] Tiled navmesh failed, trying coarse solo.');
+    } else {
+      navMesh = tiledResult.navMesh;
       navMeshQuery = new NavMeshQuery(navMesh);
       ready = true;
+      console.log('[NavGen] Tiled navmesh built successfully.');
       return;
     }
   
-    console.error('Failed to build NavMesh', res.error);
+    // 2. Coarse solo generator - fallback
+    const coarseResult: GenerateSoloNavMeshResult = generateSoloNavMesh(
+      positions,
+      indices,
+      { ...cfgVoxelized, cs: 0.5, ch: 0.3, detailSampleDist: 0, detailSampleMaxError: 1.5 } as any
+    );
   
-    // Fallback to "line mode" to unblock the game
+    if (!coarseResult.success) {
+      console.warn('[NavGen] Coarse solo navmesh also failed.');
+    } else {
+      navMesh = coarseResult.navMesh;
+      navMeshQuery = new NavMeshQuery(navMesh);
+      ready = true;
+      console.log('[NavGen] Coarse solo navmesh built successfully.');
+      return;
+    }
+  
+    // 3. Line mode - final fallback
     mode = 'fallback-line';
     navMesh = null;
     navMeshQuery = null;
     ready = true;
+    console.error('[NavGen] All navmesh generation failed. Enabling line fallback mode.');
   },
+  
 
   addObstacle: (_b: Building) => {},
   removeObstacle: (_b: Building) => {},
@@ -135,36 +162,82 @@ export const NavMeshManager = {
 
   processQueue: () => {
     if (!ready || !dispatchRef) return;
-    const req = requestQueue.shift();
-    if (!req) return;
 
-    const { unitId, startPos, endPos } = req;
-
-    try {
-      if (mode === 'fallback-line') {
-        // Simple straight line path
-        dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path: [startPos, endPos], pathIndex: 0 } });
-        return;
-      }
-      
-      if (!navMeshQuery) {
+    for (let n = 0; n < 8; n++) {
+      const req = requestQueue.shift();
+      if (!req) break;
+  
+      const { unitId, startPos, endPos } = req;
+  
+      try {
+        if (mode === 'fallback-line') {
+          dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path: [startPos, endPos], pathIndex: 0 } });
+          continue;
+        }
+        if (!navMeshQuery) {
+          dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
+          continue;
+        }
+  
+        const lift = (p: Vector3): Vector3 => ({ x: p.x, y: 0.5, z: p.z });
+  
+        const halfExtents = { x: 2, y: 4, z: 2 };
+        const res: any = navMeshQuery.computePath(lift(startPos), lift(endPos), { halfExtents });
+  
+        let points: Vector3[] = [];
+  
+        // 1) Try straightPath (most reliable source of coordinates)
+        const sp = res?.straightPath;
+        if (sp && sp.length) {
+          if (Array.isArray(sp)) {
+            // Either an array of arrays or an array of objects
+            if (Array.isArray(sp[0])) {
+              // [[x,y,z],...]
+              points = (sp as number[][]).map(([x, _y, z]) => ({ x, y: 0, z }));
+            } else if (typeof sp[0] === 'number') {
+              // Flat Float32Array/number[]: [x,y,z,x,y,z,...]
+              const arr = sp as number[];
+              for (let i = 0; i + 2 < arr.length; i += 3) {
+                points.push({ x: arr[i], y: 0, z: arr[i + 2] });
+              }
+            } else if (typeof sp[0] === 'object' && sp[0] !== null) {
+              // [{x,y,z}, ...]
+              points = (sp as any[]).map(p => ({ x: p.x, y: 0, z: p.z }));
+            }
+          }
+        }
+  
+        // 2) If straightPath is missing, the library might put coordinates in res.path
+        if (!points.length && res?.path && res.path.length) {
+          const p0 = res.path[0];
+          if (typeof p0 === 'number') {
+            // These are polyRefs, not coordinates - skip.
+          } else if (Array.isArray(p0)) {
+            points = (res.path as number[][]).map(([x, _y, z]) => ({ x, y: 0, z }));
+          } else if (typeof p0 === 'object' && p0 !== null) {
+            points = (res.path as any[]).map(p => ({ x: p.x, y: 0, z: p.z }));
+          }
+        }
+  
+        // 3) If still no coordinates, use a direct line as a fallback.
+        if (points.length < 2) {
+          points = [startPos, endPos];
+        }
+  
+        // Sanity-check: remove NaN / infinity
+        points = points.filter(p => Number.isFinite(p.x) && Number.isFinite(p.z));
+  
+        if (points.length >= 2) {
+          dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path: points, pathIndex: 0 } });
+        } else {
+          dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
+        }
+      } catch (e) {
+        console.error('NavMesh pathfinding error for unit:', unitId, e);
         dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
-        return;
-      };
-
-      const halfExtents = { x: 2, y: 4, z: 2 };
-      const { success, path } = navMeshQuery.computePath(startPos, endPos, { halfExtents });
-
-      if (success && path.length > 0) {
-        dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path, pathIndex: 0 } });
-      } else {
-        dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
+      } finally {
+        pendingRequests.delete(unitId);
       }
-    } catch (e) {
-      console.error('NavMesh pathfinding error for unit:', unitId, e);
-      dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
-    } finally {
-      pendingRequests.delete(unitId);
     }
   },
 
