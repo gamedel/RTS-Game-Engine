@@ -171,20 +171,12 @@
           error: showError,
           wire: wireGlobalHandlers
         };
+        wireGlobalHandlers();
+        show('Loading game engine…');
       })();
     </script>
     <script type="module">
-      const boot = window.__rtsBootStatus;
-      boot?.wire?.();
-      boot?.show?.('Loading game engine…');
-      import('./index.tsx')
-        .then(() => {
-          boot?.hide?.();
-        })
-        .catch((error) => {
-          console.error('Failed to load the game bundle', error);
-          boot?.error?.('Failed to load game files. Please refresh the page.');
-        });
+      import './index.tsx';
     </script>
   </body>
 </html>
