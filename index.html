@@ -5,29 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>RTS Game</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-      (function ensureBaseHref() {
-        if (document.querySelector('base')) {
-          return;
-        }
-        var path = window.location.pathname || '/';
-        if (!path.endsWith('/')) {
-          var lastSlash = path.lastIndexOf('/');
-          var lastSegment = lastSlash === -1 ? path : path.slice(lastSlash + 1);
-          if (lastSegment && lastSegment.indexOf('.') === -1) {
-            path = path + '/';
-          } else {
-            path = path.replace(/[^/]*$/, '');
-          }
-        }
-        if (!path) {
-          path = '/';
-        }
-        var base = document.createElement('base');
-        base.href = path;
-        document.head.insertBefore(base, document.head.firstChild || null);
-      })();
-    </script>
     <style>
       body {
         margin: 0;
@@ -175,8 +152,101 @@
         show('Loading game engine…');
       })();
     </script>
-    <script type="module">
-      import './index.tsx';
+    <script id="app-entry" type="module" crossorigin src="./index.tsx"></script>
+    <script>
+      (() => {
+        const entry = document.getElementById('app-entry');
+        if (!entry) {
+          return;
+        }
+
+        const boot = window.__rtsBootStatus;
+        const attrSrc = entry.getAttribute('src');
+        if (!attrSrc) {
+          return;
+        }
+
+        const assetPath = attrSrc.startsWith('./')
+          ? attrSrc.slice(2)
+          : attrSrc.startsWith('/')
+            ? attrSrc.slice(1)
+            : attrSrc;
+
+        const normalizeBase = (value) => {
+          if (!value) {
+            return '/';
+          }
+          try {
+            const url = new URL(value, window.location.origin);
+            const pathname = url.pathname || '/';
+            return pathname.endsWith('/') ? pathname : pathname + '/';
+          } catch (error) {
+            return '/';
+          }
+        };
+
+        const seenBases = new Set();
+        const baseCandidates = [];
+
+        const baseTag = document.querySelector('base');
+        if (baseTag && baseTag.getAttribute('href')) {
+          const normalized = normalizeBase(baseTag.getAttribute('href'));
+          if (!seenBases.has(normalized)) {
+            baseCandidates.push(normalized);
+            seenBases.add(normalized);
+          }
+        }
+
+        const pathname = window.location.pathname || '/';
+        const trimmedPath = pathname.replace(/\/+$/, '');
+        const segments = trimmedPath.split('/').filter(Boolean);
+        for (let i = segments.length; i >= 0; i--) {
+          const slice = segments.slice(0, i);
+          const candidate = slice.length ? '/' + slice.join('/') + '/' : '/';
+          if (!seenBases.has(candidate)) {
+            baseCandidates.push(candidate);
+            seenBases.add(candidate);
+          }
+        }
+
+        if (!seenBases.has('/')) {
+          baseCandidates.push('/');
+          seenBases.add('/');
+        }
+
+        let attemptIndex = 0;
+        const attemptedUrls = new Set();
+
+        const buildCandidateUrl = (basePath) => {
+          const normalizedAsset = assetPath.replace(/^\//, '');
+          return new URL(normalizedAsset, window.location.origin + basePath).toString();
+        };
+
+        const nextAttempt = () => {
+          while (attemptIndex < baseCandidates.length) {
+            const basePath = baseCandidates[attemptIndex++];
+            const candidateUrl = buildCandidateUrl(basePath);
+            if (attemptedUrls.has(candidateUrl)) {
+              continue;
+            }
+            attemptedUrls.add(candidateUrl);
+            if (entry.src === candidateUrl || entry.getAttribute('src') === candidateUrl) {
+              continue;
+            }
+            boot?.show?.('Loading game files…');
+            entry.src = candidateUrl;
+            return true;
+          }
+          return false;
+        };
+
+        entry.addEventListener('error', function handleEntryError(event) {
+          console.error('Failed to load app entry script', entry.src, event);
+          if (!nextAttempt()) {
+            boot?.error?.('Failed to load game files. Please refresh the page.');
+          }
+        });
+      })();
     </script>
   </body>
 </html>
