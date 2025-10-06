@@ -155,6 +155,13 @@
     <script>
       (() => {
         const boot = window.__rtsBootStatus;
+        const ENTRY_METADATA = 'metadata.json';
+
+        const entryScript = document.querySelector('script[data-entry="app-entry"]');
+        if (!(entryScript instanceof HTMLScriptElement)) {
+          boot?.error?.('Failed to initialize game loader. Please refresh the page.');
+          return;
+        }
 
         const normalizeBase = (value) => {
           if (!value) {
@@ -206,12 +213,95 @@
           return candidates;
         };
 
-        const nextAttempt = (state, script) => {
+        const ensureState = () => {
+          if (entryScript.__rtsLoaderState) {
+            return entryScript.__rtsLoaderState;
+          }
+
+          const state = {
+            assetPath: null,
+            baseCandidates: collectBaseCandidates(),
+            attemptIndex: 0,
+            attempted: new Set(),
+            metadataAttempts: new Set(),
+            metadataPromise: null,
+          };
+
+          entryScript.__rtsLoaderState = state;
+          return state;
+        };
+
+        const fetchMetadata = async (state) => {
+          if (state.metadataPromise) {
+            return state.metadataPromise;
+          }
+
+          state.metadataPromise = (async () => {
+            for (let i = 0; i < state.baseCandidates.length; i++) {
+              const basePath = state.baseCandidates[i];
+              const metadataUrl = new URL(
+                ENTRY_METADATA,
+                window.location.origin + basePath,
+              ).toString();
+
+              if (state.metadataAttempts.has(metadataUrl)) {
+                continue;
+              }
+
+              state.metadataAttempts.add(metadataUrl);
+
+              try {
+                const response = await fetch(metadataUrl, {
+                  cache: 'no-cache',
+                  credentials: 'same-origin',
+                });
+
+                if (!response.ok) {
+                  continue;
+                }
+
+                const metadata = await response.json();
+
+                if (!metadata || typeof metadata.entryBundle !== 'string') {
+                  continue;
+                }
+
+                const trimmed = metadata.entryBundle.trim();
+                if (!trimmed) {
+                  continue;
+                }
+
+                const normalizedAsset = trimmed.replace(/^\.\//, '').replace(/^\//, '');
+                state.assetPath = normalizedAsset;
+
+                // Prioritize the base path that successfully resolved metadata.
+                state.baseCandidates = [
+                  basePath,
+                  ...state.baseCandidates.filter((candidate) => candidate !== basePath),
+                ];
+                state.attemptIndex = 0;
+
+                return metadata;
+              } catch (error) {
+                console.error('Failed to load metadata from', metadataUrl, error);
+              }
+            }
+
+            throw new Error('Unable to locate game metadata.');
+          })();
+
+          return state.metadataPromise;
+        };
+
+        const nextAttempt = (state) => {
+          if (!state.assetPath) {
+            return false;
+          }
+
           while (state.attemptIndex < state.baseCandidates.length) {
             const basePath = state.baseCandidates[state.attemptIndex++];
-            const normalizedAsset = state.assetPath.replace(/^\//, '');
             const candidateUrl = new URL(
-              normalizedAsset,
+              state.assetPath,
               window.location.origin + basePath,
             ).toString();
 
@@ -221,59 +311,48 @@
 
             state.attempted.add(candidateUrl);
 
-            if (script.src === candidateUrl || script.getAttribute('src') === candidateUrl) {
+            if (entryScript.src === candidateUrl || entryScript.getAttribute('src') === candidateUrl) {
               continue;
             }
 
             boot?.show?.('Loading game files…');
-            script.src = candidateUrl;
+            entryScript.src = candidateUrl;
             return true;
           }
 
           return false;
         };
 
-        window.__rtsRetryEntry = (script, event) => {
-          if (!(script instanceof HTMLScriptElement)) {
-            return;
+        const startLoading = async () => {
+          const state = ensureState();
+
+          if (!state.assetPath) {
+            try {
+              await fetchMetadata(state);
+            } catch (error) {
+              console.error(error);
+              boot?.error?.('Failed to find game files. Please refresh the page.');
+              return;
+            }
           }
 
-          const attrSrc = script.getAttribute('src');
-          if (!attrSrc) {
-            boot?.error?.('Failed to locate game files. Please refresh the page.');
-            return;
-          }
-
-          if (!script.__rtsLoaderState) {
-            const assetPath = attrSrc.startsWith('./')
-              ? attrSrc.slice(2)
-              : attrSrc.startsWith('/')
-                ? attrSrc.slice(1)
-                : attrSrc;
-
-            script.__rtsLoaderState = {
-              assetPath,
-              baseCandidates: collectBaseCandidates(),
-              attemptIndex: 0,
-              attempted: new Set(),
-            };
-          }
-
-          const state = script.__rtsLoaderState;
-          console.error('Failed to load app entry script', script.src, event);
-
-          if (!nextAttempt(state, script)) {
+          if (!nextAttempt(state)) {
             boot?.error?.('Failed to load game files. Please refresh the page.');
           }
         };
+
+        entryScript.addEventListener('error', (event) => {
+          const state = ensureState();
+          console.error('Failed to load app entry script', entryScript.src, event);
+
+          if (!nextAttempt(state)) {
+            boot?.error?.('Failed to load game files. Please refresh the page.');
+          }
+        });
+
+        startLoading();
       })();
     </script>
-    <script
-      data-entry="app-entry"
-      type="module"
-      crossorigin
-      src="./index.tsx"
-      onerror="window.__rtsRetryEntry?.(this, event)"
-    ></script>
+    <script data-entry="app-entry" type="module" crossorigin></script>
   </body>
 </html>
