@@ -12,14 +12,20 @@
         }
         var path = window.location.pathname || '/';
         if (!path.endsWith('/')) {
-          path = path.replace(/[^/]*$/, '');
+          var lastSlash = path.lastIndexOf('/');
+          var lastSegment = lastSlash === -1 ? path : path.slice(lastSlash + 1);
+          if (lastSegment && lastSegment.indexOf('.') === -1) {
+            path = path + '/';
+          } else {
+            path = path.replace(/[^/]*$/, '');
+          }
         }
         if (!path) {
           path = '/';
         }
         var base = document.createElement('base');
         base.href = path;
-        document.head.insertBefore(base, document.head.firstChild);
+        document.head.insertBefore(base, document.head.firstChild || null);
       })();
     </script>
     <style>
@@ -53,8 +59,41 @@
       .custom-scrollbar-vertical::-webkit-scrollbar-thumb:hover {
         background: #718096; /* slate-500 */
       }
+      #boot-status {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+        transition: opacity 0.25s ease, transform 0.25s ease;
+        z-index: 9999;
+      }
+      #boot-status .boot-status__message {
+        pointer-events: auto;
+        min-width: 240px;
+        max-width: min(90vw, 420px);
+        border-radius: 0.75rem;
+        background: rgba(15, 23, 42, 0.9);
+        color: #e2e8f0;
+        padding: 1.25rem 1.5rem;
+        text-align: center;
+        font: 600 1rem/1.5 "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        box-shadow: 0 20px 45px rgba(15, 23, 42, 0.45);
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        backdrop-filter: blur(10px);
+      }
+      #boot-status.boot-status--hidden {
+        opacity: 0;
+        transform: translateY(12px);
+      }
+      #boot-status.boot-status--error .boot-status__message {
+        background: rgba(127, 29, 29, 0.92);
+        border-color: rgba(248, 113, 113, 0.65);
+        color: #fef2f2;
+      }
     </style>
-  <script type="importmap">
+    <script type="importmap">
 {
   "imports": {
     "react": "https://esm.sh/react@^19.1.1",
@@ -71,9 +110,81 @@
   }
 }
 </script>
-</head>
+  </head>
   <body>
+    <div id="boot-status">
+      <div class="boot-status__message">Loading game engine…</div>
+    </div>
     <div id="root"></div>
-    <script type="module" src="./index.tsx"></script>
+    <script>
+      (function setupBootStatus() {
+        var statusRoot = document.getElementById('boot-status');
+        if (!statusRoot) {
+          return;
+        }
+        var messageEl = statusRoot.querySelector('.boot-status__message');
+        if (!messageEl) {
+          return;
+        }
+        function show(message, isError) {
+          if (!statusRoot || !messageEl) {
+            return;
+          }
+          if (message) {
+            messageEl.textContent = message;
+          }
+          statusRoot.classList.toggle('boot-status--error', !!isError);
+          statusRoot.classList.remove('boot-status--hidden');
+        }
+        function hide() {
+          if (!statusRoot) {
+            return;
+          }
+          statusRoot.classList.remove('boot-status--error');
+          statusRoot.classList.add('boot-status--hidden');
+        }
+        function showError(message) {
+          show(message, true);
+        }
+        function wireGlobalHandlers() {
+          window.addEventListener('error', function handleWindowError(event) {
+            var errorMessage = event && event.message ? event.message : 'Unknown runtime error';
+            showError('Runtime error: ' + errorMessage);
+            if (event && event.error) {
+              console.error('Runtime error caught before boot completed', event.error);
+            }
+          });
+          window.addEventListener('unhandledrejection', function handleRejection(event) {
+            var reason = event && event.reason ? event.reason : 'Unknown promise rejection';
+            if (typeof reason === 'object' && reason && 'message' in reason) {
+              reason = reason.message;
+            }
+            showError('Unhandled promise rejection: ' + reason);
+            if (event && event.reason) {
+              console.error('Unhandled promise rejection before boot completed', event.reason);
+            }
+          });
+        }
+        window.__rtsBootStatus = {
+          show: show,
+          hide: hide,
+          error: showError,
+          wire: wireGlobalHandlers
+        };
+      })();
+    </script>
+    <script type="module">
+      const boot = window.__rtsBootStatus;
+      boot?.wire?.();
+      boot?.show?.('Loading game engine…');
+      import('./index.tsx')
+        .then(() => {
+          boot?.hide?.();
+        })
+        .catch((error) => {
+          console.error('Failed to load the game bundle', error);
+          boot?.error?.('Failed to load game files. Please refresh the page.');
+        });
+    </script>
   </body>
 </html>
