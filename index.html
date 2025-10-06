@@ -152,31 +152,9 @@
         show('Loading game engine…');
       })();
     </script>
-    <script data-entry="app-entry" type="module" crossorigin src="./index.tsx"></script>
     <script>
       (() => {
-        const moduleScripts = Array.from(
-          document.querySelectorAll('script[type="module"][src]'),
-        );
-        const entry = moduleScripts.find((script) => {
-          const src = script.getAttribute('src');
-          return !!src && src.includes('index');
-        });
-        if (!(entry instanceof HTMLScriptElement)) {
-          return;
-        }
-
         const boot = window.__rtsBootStatus;
-        const attrSrc = entry.getAttribute('src');
-        if (!attrSrc) {
-          return;
-        }
-
-        const assetPath = attrSrc.startsWith('./')
-          ? attrSrc.slice(2)
-          : attrSrc.startsWith('/')
-            ? attrSrc.slice(1)
-            : attrSrc;
 
         const normalizeBase = (value) => {
           if (!value) {
@@ -191,68 +169,111 @@
           }
         };
 
-        const seenBases = new Set();
-        const baseCandidates = [];
+        const collectBaseCandidates = () => {
+          const seenBases = new Set();
+          const candidates = [];
 
-        const baseTag = document.querySelector('base');
-        if (baseTag && baseTag.getAttribute('href')) {
-          const normalized = normalizeBase(baseTag.getAttribute('href'));
-          if (!seenBases.has(normalized)) {
-            baseCandidates.push(normalized);
-            seenBases.add(normalized);
+          const baseTag = document.querySelector('base');
+          if (baseTag) {
+            const href = baseTag.getAttribute('href');
+            if (href) {
+              const normalized = normalizeBase(href);
+              if (!seenBases.has(normalized)) {
+                candidates.push(normalized);
+                seenBases.add(normalized);
+              }
+            }
           }
-        }
 
-        const pathname = window.location.pathname || '/';
-        const trimmedPath = pathname.replace(/\/+$/, '');
-        const segments = trimmedPath.split('/').filter(Boolean);
-        for (let i = segments.length; i >= 0; i--) {
-          const slice = segments.slice(0, i);
-          const candidate = slice.length ? '/' + slice.join('/') + '/' : '/';
-          if (!seenBases.has(candidate)) {
-            baseCandidates.push(candidate);
-            seenBases.add(candidate);
+          const pathname = window.location.pathname || '/';
+          const trimmedPath = pathname.replace(/\/+$/, '');
+          const segments = trimmedPath.split('/').filter(Boolean);
+
+          for (let i = segments.length; i >= 0; i--) {
+            const slice = segments.slice(0, i);
+            const candidate = slice.length ? '/' + slice.join('/') + '/' : '/';
+            if (!seenBases.has(candidate)) {
+              candidates.push(candidate);
+              seenBases.add(candidate);
+            }
           }
-        }
 
-        if (!seenBases.has('/')) {
-          baseCandidates.push('/');
-          seenBases.add('/');
-        }
+          if (!seenBases.has('/')) {
+            candidates.push('/');
+            seenBases.add('/');
+          }
 
-        let attemptIndex = 0;
-        const attemptedUrls = new Set();
-
-        const buildCandidateUrl = (basePath) => {
-          const normalizedAsset = assetPath.replace(/^\//, '');
-          return new URL(normalizedAsset, window.location.origin + basePath).toString();
+          return candidates;
         };
 
-        const nextAttempt = () => {
-          while (attemptIndex < baseCandidates.length) {
-            const basePath = baseCandidates[attemptIndex++];
-            const candidateUrl = buildCandidateUrl(basePath);
-            if (attemptedUrls.has(candidateUrl)) {
+        const nextAttempt = (state, script) => {
+          while (state.attemptIndex < state.baseCandidates.length) {
+            const basePath = state.baseCandidates[state.attemptIndex++];
+            const normalizedAsset = state.assetPath.replace(/^\//, '');
+            const candidateUrl = new URL(
+              normalizedAsset,
+              window.location.origin + basePath,
+            ).toString();
+
+            if (state.attempted.has(candidateUrl)) {
               continue;
             }
-            attemptedUrls.add(candidateUrl);
-            if (entry.src === candidateUrl || entry.getAttribute('src') === candidateUrl) {
+
+            state.attempted.add(candidateUrl);
+
+            if (script.src === candidateUrl || script.getAttribute('src') === candidateUrl) {
               continue;
             }
+
             boot?.show?.('Loading game files…');
-            entry.src = candidateUrl;
+            script.src = candidateUrl;
             return true;
           }
+
           return false;
         };
 
-        entry.addEventListener('error', function handleEntryError(event) {
-          console.error('Failed to load app entry script', entry.src, event);
-          if (!nextAttempt()) {
+        window.__rtsRetryEntry = (script, event) => {
+          if (!(script instanceof HTMLScriptElement)) {
+            return;
+          }
+
+          const attrSrc = script.getAttribute('src');
+          if (!attrSrc) {
+            boot?.error?.('Failed to locate game files. Please refresh the page.');
+            return;
+          }
+
+          if (!script.__rtsLoaderState) {
+            const assetPath = attrSrc.startsWith('./')
+              ? attrSrc.slice(2)
+              : attrSrc.startsWith('/')
+                ? attrSrc.slice(1)
+                : attrSrc;
+
+            script.__rtsLoaderState = {
+              assetPath,
+              baseCandidates: collectBaseCandidates(),
+              attemptIndex: 0,
+              attempted: new Set(),
+            };
+          }
+
+          const state = script.__rtsLoaderState;
+          console.error('Failed to load app entry script', script.src, event);
+
+          if (!nextAttempt(state, script)) {
             boot?.error?.('Failed to load game files. Please refresh the page.');
           }
-        });
+        };
       })();
     </script>
+    <script
+      data-entry="app-entry"
+      type="module"
+      crossorigin
+      src="./index.tsx"
+      onerror="window.__rtsRetryEntry?.(this, event)"
+    ></script>
   </body>
 </html>
