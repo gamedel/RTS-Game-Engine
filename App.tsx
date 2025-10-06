@@ -1,6 +1,6 @@
 import React, { useReducer, useMemo, useState, useRef, useEffect } from 'react';
 import { Canvas } from '@react-three/fiber';
-import { GameState, GameObject, AIDifficulty, MapType, Vector3, PlayerSetupConfig } from './types';
+import { GameState, GameObject, MapType, Vector3, PlayerSetupConfig } from './types';
 import { createInitialGameState } from './constants';
 import { UI } from './components/UI';
 import { GameScene } from './components/GameScene';
@@ -43,6 +43,65 @@ const LoadingOverlay: React.FC<{ loadingMessage: string | null }> = ({ loadingMe
 };
 
 
+const StatusBar: React.FC<{ message: string | null }> = ({ message }) => {
+  if (!message) return null;
+  return (
+    <div className="pointer-events-none absolute bottom-0 left-0 right-0 z-50 flex justify-center pb-3">
+      <div className="pointer-events-auto max-w-full rounded-md bg-slate-900/80 px-4 py-2 text-sm text-slate-200 shadow-lg ring-1 ring-slate-700">
+        {message}
+      </div>
+    </div>
+  );
+};
+
+type CanvasErrorBoundaryProps = {
+  children: React.ReactNode;
+  onError?: (error: Error) => void;
+  resetKey: string;
+};
+
+class CanvasErrorBoundary extends React.Component<CanvasErrorBoundaryProps, { hasError: boolean }> {
+  constructor(props: CanvasErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error) {
+    this.props.onError?.(error);
+  }
+
+  componentDidUpdate(prevProps: CanvasErrorBoundaryProps) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.hasError) {
+      this.setState({ hasError: false });
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return null;
+    }
+    return this.props.children;
+  }
+}
+
+const CanvasErrorOverlay: React.FC<{ message: string; onBackToMenu: () => void }> = ({ message, onBackToMenu }) => (
+  <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/80 px-6 text-center text-slate-100">
+    <h2 className="mb-4 text-2xl font-bold text-red-300">Rendering Error</h2>
+    <p className="mb-6 max-w-xl text-base text-slate-200">{message}</p>
+    <button
+      onClick={onBackToMenu}
+      className="rounded-lg bg-slate-700 px-6 py-3 text-lg font-semibold text-white shadow ring-2 ring-slate-500 transition hover:bg-slate-600"
+    >
+      Return to Main Menu
+    </button>
+  </div>
+);
+
+
 export type CameraControlsRef = {
   setTarget: (target: Vector3) => void;
 };
@@ -61,6 +120,8 @@ function AppContent() {
   const [camera, setCamera] = useState<THREE.Camera | null>(null);
   const cameraControlsRef = useRef<CameraControlsRef>(null);
   const [loadingMessage, setLoadingMessage] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>('Ready');
+  const [canvasError, setCanvasError] = useState<string | null>(null);
   const navMeshInitialized = useRef(false);
   const isTouchDevice = useIsTouchDevice();
 
@@ -73,19 +134,24 @@ function AppContent() {
     const initializeNavMesh = async () => {
       try {
         setLoadingMessage('Initializing Pathfinding');
+        setStatusMessage('Initializing pathfinding...');
         await NavMeshManager.init(dispatch);
         if (!isMounted) return;
 
         setLoadingMessage('Building Navigation Mesh');
+        setStatusMessage('Building navigation mesh...');
         await NavMeshManager.buildNavMesh(gameState.buildings, gameState.resourcesNodes);
         if (!isMounted) return;
-        
+
         navMeshInitialized.current = true;
         setLoadingMessage(null);
+        setStatusMessage('Navigation mesh ready');
       } catch (error) {
         console.error("Failed to initialize NavMeshManager:", error);
         if (isMounted) {
+          const message = error instanceof Error ? error.message : String(error);
           setLoadingMessage("Error: Pathfinding failed to load");
+          setStatusMessage(`NavMesh error: ${message}`);
         }
       }
     };
@@ -126,14 +192,26 @@ function AppContent() {
     navMeshInitialized.current = false;
     dispatch({ type: 'START_NEW_GAME', payload: { mapType, players } });
     setGamePhase('playing');
+    setStatusMessage('Starting new game...');
+    setCanvasError(null);
   };
 
   const handleBackToMenu = () => {
     setGamePhase('menu');
     navMeshInitialized.current = false;
     NavMeshManager.terminate();
+    setLoadingMessage(null);
+    setCanvasError(null);
+    setStatusMessage('Returned to main menu');
   };
-  
+
+  const handleCanvasError = (error: Error) => {
+    const message = error.message || 'Unknown rendering error';
+    setCanvasError(message);
+    setStatusMessage(`Canvas error: ${message}`);
+    setLoadingMessage(null);
+  };
+
   const initialCameraPos: [number, number, number] = [0, 60, 70];
 
   return (
@@ -145,24 +223,30 @@ function AppContent() {
       {gamePhase === 'playing' && !loadingMessage && <UI gameState={gameState} selectedObjects={selectedObjects} dispatch={dispatch} fps={fps} camera={camera} cameraControlsRef={cameraControlsRef} />}
       <div className="flex-grow relative">
         {gamePhase === 'playing' && isSelecting && <div style={selectionBoxStyle} />}
-        <Canvas
-          camera={{ position: initialCameraPos, fov: 35 }}
-          shadows={false}
-          dpr={isTouchDevice ? 1 : [1, 1.25]}
-          gl={{ antialias: false, powerPreference: 'high-performance' }}
-          onContextMenu={(e) => e.preventDefault()}
-        >
-            <GameScene
-              gamePhase={gamePhase}
-              gameState={gameState}
-              dispatch={dispatch}
-              setSelectionBox={setSelectionBox}
-              setIsSelecting={setIsSelecting}
-              setFps={setFps}
-              setCamera={setCamera}
-              cameraControlsRef={cameraControlsRef}
-            />
-        </Canvas>
+        <CanvasErrorBoundary onError={handleCanvasError} resetKey={gamePhase}>
+          {!canvasError && (
+            <Canvas
+              camera={{ position: initialCameraPos, fov: 35 }}
+              shadows={false}
+              dpr={isTouchDevice ? 1 : [1, 1.25]}
+              gl={{ antialias: false, powerPreference: 'high-performance' }}
+              onContextMenu={(e) => e.preventDefault()}
+            >
+                <GameScene
+                  gamePhase={gamePhase}
+                  gameState={gameState}
+                  dispatch={dispatch}
+                  setSelectionBox={setSelectionBox}
+                  setIsSelecting={setIsSelecting}
+                  setFps={setFps}
+                  setCamera={setCamera}
+                  cameraControlsRef={cameraControlsRef}
+                />
+            </Canvas>
+          )}
+        </CanvasErrorBoundary>
+        {canvasError && <CanvasErrorOverlay message={canvasError} onBackToMenu={handleBackToMenu} />}
+        <StatusBar message={statusMessage} />
       </div>
     </div>
   );

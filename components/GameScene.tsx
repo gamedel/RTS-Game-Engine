@@ -366,7 +366,68 @@ const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, s
         dispatch({ type: 'SELECT_OBJECT', payload: { id: null } });
     }
   }, [dispatch, gamePhase, gameState.buildMode, gameState.selectedIds, gameState.units, handleObjectClick, humanPlayer]);
-    
+
+  const handleGroundContextMenu = useCallback((e: any) => {
+    if (gamePhase !== 'playing' || !humanPlayer) return;
+    e.stopPropagation();
+    if (gameState.buildMode) {
+        dispatch({ type: 'SET_BUILD_MODE', payload: null });
+        return;
+    }
+
+    const selectedPlayerBuildings = gameState.selectedIds
+        .map(id => gameState.buildings[id])
+        .filter(b => b && b.playerId === humanPlayer.id && (b.buildingType === BuildingType.TOWN_HALL || b.buildingType === BuildingType.BARRACKS)) as Building[];
+
+    if (selectedPlayerBuildings.length > 0) {
+        const firstType = selectedPlayerBuildings[0].buildingType;
+        const allSameType = selectedPlayerBuildings.every(b => b.buildingType === firstType);
+
+        if (allSameType) {
+            const rallyPosition = { x: e.point.x, y: 0, z: e.point.z };
+            selectedPlayerBuildings.forEach(building => {
+                dispatch({ type: 'SET_RALLY_POINT', payload: { buildingId: building.id, position: rallyPosition } });
+            });
+
+            const marker: CommandMarkerType = {
+                id: uuidv4(),
+                position: rallyPosition,
+                startTime: Date.now(),
+            };
+            dispatch({ type: 'ADD_COMMAND_MARKER', payload: marker });
+            return;
+        }
+    }
+
+    const selectedUnits = gameState.selectedIds
+        .map(id => gameState.units[id])
+        .filter(u => u && u.type === GameObjectType.UNIT && u.playerId === humanPlayer.id) as Unit[];
+
+    if (selectedUnits.length > 0) {
+        const targetCenter = { x: e.point.x, y: 0, z: e.point.z };
+        const formationPositions = getFormationPositions(targetCenter, selectedUnits.length);
+        const squadId = uuidv4();
+
+        // Distribute positions to units
+        selectedUnits.forEach((unit, index) => {
+            const targetPosition = formationPositions[index] || targetCenter;
+            dispatch({ type: 'COMMAND_UNIT', payload: { unitId: unit.id, targetPosition, finalDestination: targetPosition, targetId: undefined, squadId } });
+        });
+
+        // Show a reduced number of markers for performance
+        formationPositions.forEach((pos, i) => {
+            // Show one marker for every 6 units, plus the very last one to mark the formation's end
+            if (i % 6 !== 0 && i !== formationPositions.length - 1) return;
+            const marker: CommandMarkerType = {
+                id: uuidv4(),
+                position: pos,
+                startTime: Date.now(),
+            };
+            dispatch({ type: 'ADD_COMMAND_MARKER', payload: marker });
+        });
+    }
+  }, [dispatch, gameState.selectedIds, gameState.units, gameState.buildings, gameState.buildMode, gamePhase, humanPlayer]);
+
   const handleGroundPointerDown = useCallback((e: any) => {
     if (gamePhase !== 'playing') return;
     const pointerType = getPointerType(e);
@@ -590,67 +651,6 @@ const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, s
       activePointerRef.current = null;
     }
   }, []);
-
-  const handleGroundContextMenu = useCallback((e: any) => {
-    if (gamePhase !== 'playing' || !humanPlayer) return;
-    e.stopPropagation();
-    if (gameState.buildMode) {
-        dispatch({ type: 'SET_BUILD_MODE', payload: null });
-        return;
-    }
-
-    const selectedPlayerBuildings = gameState.selectedIds
-        .map(id => gameState.buildings[id])
-        .filter(b => b && b.playerId === humanPlayer.id && (b.buildingType === BuildingType.TOWN_HALL || b.buildingType === BuildingType.BARRACKS)) as Building[];
-
-    if (selectedPlayerBuildings.length > 0) {
-        const firstType = selectedPlayerBuildings[0].buildingType;
-        const allSameType = selectedPlayerBuildings.every(b => b.buildingType === firstType);
-
-        if (allSameType) {
-            const rallyPosition = { x: e.point.x, y: 0, z: e.point.z };
-            selectedPlayerBuildings.forEach(building => {
-                dispatch({ type: 'SET_RALLY_POINT', payload: { buildingId: building.id, position: rallyPosition } });
-            });
-
-            const marker: CommandMarkerType = {
-                id: uuidv4(),
-                position: rallyPosition,
-                startTime: Date.now(),
-            };
-            dispatch({ type: 'ADD_COMMAND_MARKER', payload: marker });
-            return;
-        }
-    }
-
-    const selectedUnits = gameState.selectedIds
-        .map(id => gameState.units[id])
-        .filter(u => u && u.type === GameObjectType.UNIT && u.playerId === humanPlayer.id) as Unit[];
-
-    if (selectedUnits.length > 0) {
-        const targetCenter = { x: e.point.x, y: 0, z: e.point.z };
-        const formationPositions = getFormationPositions(targetCenter, selectedUnits.length);
-        const squadId = uuidv4();
-
-        // Distribute positions to units
-        selectedUnits.forEach((unit, index) => {
-            const targetPosition = formationPositions[index] || targetCenter;
-            dispatch({ type: 'COMMAND_UNIT', payload: { unitId: unit.id, targetPosition, finalDestination: targetPosition, targetId: undefined, squadId } });
-        });
-
-        // Show a reduced number of markers for performance
-        formationPositions.forEach((pos, i) => {
-            // Show one marker for every 6 units, plus the very last one to mark the formation's end
-            if (i % 6 !== 0 && i !== formationPositions.length - 1) return;
-            const marker: CommandMarkerType = {
-                id: uuidv4(),
-                position: pos,
-                startTime: Date.now(),
-            };
-            dispatch({ type: 'ADD_COMMAND_MARKER', payload: marker });
-        });
-    }
-  }, [dispatch, gameState.selectedIds, gameState.units, gameState.buildings, gameState.buildMode, gamePhase, humanPlayer]);
 
   return (
     <>
