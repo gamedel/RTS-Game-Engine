@@ -152,11 +152,17 @@
         show('Loading game engine…');
       })();
     </script>
-    <script id="app-entry" type="module" crossorigin src="./index.tsx"></script>
+    <script data-entry="app-entry" type="module" crossorigin src="./index.tsx"></script>
     <script>
       (() => {
-        const entry = document.getElementById('app-entry');
-        if (!entry) {
+        const moduleScripts = Array.from(
+          document.querySelectorAll('script[type="module"][src]'),
+        );
+        const entry = moduleScripts.find((script) => {
+          const src = script.getAttribute('src');
+          return !!src && src.includes('index');
+        });
+        if (!(entry instanceof HTMLScriptElement)) {
           return;
         }
 
