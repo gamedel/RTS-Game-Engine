@@ -1,6 +1,6 @@
 import React, { useMemo, useCallback, useRef, useState, useEffect, forwardRef, useImperativeHandle } from 'react';
 import { useThree, useFrame } from '@react-three/fiber';
-import { OrbitControls, Torus } from '@react-three/drei';
+import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
 import { GameState, Action, GameObject, GameObjectType, UnitType, BuildingType, ResourceType, Unit, Building, ResourceNode, UnitStatus, Vector3, CommandMarker as CommandMarkerType, Projectile, UnitStance } from '../types';
 import { useGameEngine } from '../hooks/useGameEngine';
@@ -16,6 +16,7 @@ import { RallyPointMarker } from './game/scene/RallyPointMarker';
 import { CameraControlsRef } from '../../App';
 import { v4 as uuidv4 } from 'uuid';
 import { InstancedRenderer } from './game/InstancedRenderer';
+import { useIsTouchDevice } from '../hooks/useIsTouchDevice';
 
 // This component exists solely to host the useGameEngine hook within the Canvas context.
 const GameEngineComponent: React.FC<{ gameState: GameState, dispatch: React.Dispatch<Action>, setFps: (fps: number) => void }> = ({ gameState, dispatch, setFps }) => {
@@ -94,6 +95,23 @@ type GameSceneProps = {
     cameraControlsRef: React.RefObject<CameraControlsRef>;
 };
 
+type ActivePointerState = {
+    target: 'ground' | 'object';
+    objectId?: string;
+    pointerType: string;
+    start: { x: number; y: number };
+    startPoint?: THREE.Vector3;
+    startTime: number;
+    hasMoved: boolean;
+};
+
+const LONG_PRESS_THRESHOLD = 400;
+const TOUCH_DRAG_THRESHOLD = 18;
+
+const getPointerType = (event: any): string => {
+    return event.pointerType || event?.nativeEvent?.pointerType || 'mouse';
+};
+
 // --- Camera Control Components ---
 
 // Renders only during the 'menu' phase to provide a cinematic camera sweep.
@@ -168,6 +186,7 @@ const GameCameraControls = forwardRef<CameraControlsRef, { initialTarget: Vector
 
 
 const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, setSelectionBox, setIsSelecting, setFps, setCamera, cameraControlsRef }) => {
+  const isTouchDevice = useIsTouchDevice();
   const allBuildingsAndResources = useMemo(() => [
     ...Object.values(gameState.buildings),
     ...Object.values(gameState.resourcesNodes)
@@ -193,8 +212,9 @@ const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, s
 
   const { camera: R3FCamera, size } = useThree();
   const selectionStartPoint = useRef<{x: number, y: number} | null>(null);
+  const activePointerRef = useRef<ActivePointerState | null>(null);
   const lastClickRef = useRef<{ id: string, time: number } | null>(null);
-  const DOUBLE_CLICK_TIMEOUT = 300; // ms
+  const DOUBLE_CLICK_TIMEOUT = isTouchDevice ? 400 : 300; // ms
   const humanPlayer = gameState.players.find(p => p.isHuman);
 
   const selectedIdsSet = useMemo(() => new Set(gameState.selectedIds), [gameState.selectedIds]);
@@ -295,9 +315,74 @@ const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, s
         dispatch({ type: 'ADD_COMMAND_MARKER', payload: marker });
     }
   }, [dispatch, gameState.selectedIds, gameState.units, gameState.buildMode, allObjectsMap, gamePhase, humanPlayer]);
+
+  const processGroundSimpleClick = useCallback((e: any) => {
+    if (gamePhase !== 'playing' || !humanPlayer) return;
+
+    if (gameState.buildMode && gameState.buildMode.canPlace) {
+       const selectedWorkers = gameState.selectedIds
+          .map(id => gameState.units[id])
+          .filter(u => u && u.type === GameObjectType.UNIT && u.unitType === UnitType.WORKER) as Unit[];
+
+       let builders = selectedWorkers;
+
+       if (builders.length === 0) {
+          const idleWorker = Object.values(gameState.units).find(u => u.unitType === UnitType.WORKER && u.status === UnitStatus.IDLE && u.playerId === humanPlayer.id);
+          if (idleWorker) builders = [idleWorker];
+       }
+
+       if (builders.length > 0) {
+           dispatch({
+               type: 'COMMAND_BUILD',
+               payload: {
+                  workerIds: builders.map(b => b.id),
+                  type: gameState.buildMode.type,
+                  position: { x: e.point.x, y: 0, z: e.point.z },
+              }
+           });
+       } else {
+           dispatch({ type: 'SET_BUILD_MODE', payload: null });
+       }
+       return;
+    }
+
+    const clickPoint = new THREE.Vector3(e.point.x, 0, e.point.z);
+    let clickedUnit: Unit | null = null;
+    let minDistanceSq = 1.5 * 1.5;
+
+    for (const unit of Object.values(gameState.units)) {
+        if (unit.isDying) continue;
+        const unitPos = new THREE.Vector3(unit.position.x, 0, unit.position.z);
+        const distanceSq = clickPoint.distanceToSquared(unitPos);
+        if (distanceSq < minDistanceSq) {
+            minDistanceSq = distanceSq;
+            clickedUnit = unit;
+        }
+    }
+
+    if (clickedUnit) {
+        handleObjectClick(e, clickedUnit.id);
+    } else {
+        dispatch({ type: 'SELECT_OBJECT', payload: { id: null } });
+    }
+  }, [dispatch, gamePhase, gameState.buildMode, gameState.selectedIds, gameState.units, handleObjectClick, humanPlayer]);
     
   const handleGroundPointerDown = useCallback((e: any) => {
     if (gamePhase !== 'playing') return;
+    const pointerType = getPointerType(e);
+
+    if (pointerType === 'touch') {
+      activePointerRef.current = {
+        target: 'ground',
+        pointerType,
+        start: { x: e.nativeEvent?.offsetX ?? 0, y: e.nativeEvent?.offsetY ?? 0 },
+        startPoint: new THREE.Vector3(e.point.x, 0, e.point.z),
+        startTime: Date.now(),
+        hasMoved: false,
+      };
+      return;
+    }
+
     if (e.button === 0) { // Left click
       selectionStartPoint.current = { x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY };
       setIsSelecting(true);
@@ -306,6 +391,20 @@ const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, s
 
   const handleGroundPointerMove = useCallback((e: any) => {
     if (gamePhase !== 'playing') return;
+    const pointerType = getPointerType(e);
+
+    if (pointerType === 'touch') {
+      if (activePointerRef.current && activePointerRef.current.target === 'ground') {
+        const offsetX = e.nativeEvent?.offsetX ?? activePointerRef.current.start.x;
+        const offsetY = e.nativeEvent?.offsetY ?? activePointerRef.current.start.y;
+        const dragDistance = Math.hypot(offsetX - activePointerRef.current.start.x, offsetY - activePointerRef.current.start.y);
+        if (dragDistance > TOUCH_DRAG_THRESHOLD) {
+          activePointerRef.current.hasMoved = true;
+        }
+      }
+      return;
+    }
+
     if (selectionStartPoint.current) {
       setSelectionBox({ start: selectionStartPoint.current, end: { x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY } });
     } else if (gameState.buildMode) {
@@ -315,117 +414,182 @@ const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, s
 
   const handleGroundPointerUp = useCallback((e: any) => {
     if (gamePhase !== 'playing' || !humanPlayer) return;
-    if (e.button === 0) { // Left click release
-      if (selectionStartPoint.current) {
-        const start = selectionStartPoint.current;
-        const end = { x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY };
-        const dragDistance = Math.hypot(end.x - start.x, end.y - start.y);
-        
-        if (dragDistance < 10) { // It's a click, not a drag
-          if (gameState.buildMode && gameState.buildMode.canPlace) {
-             const selectedWorkers = gameState.selectedIds
-                .map(id => gameState.units[id])
-                .filter(u => u && u.type === GameObjectType.UNIT && u.unitType === UnitType.WORKER) as Unit[];
-             
-             let builders = selectedWorkers;
+    const pointerType = getPointerType(e);
 
-             if (builders.length === 0) {
-                // Fallback to finding any idle worker if nothing is selected or selected units aren't workers
-                const idleWorker = Object.values(gameState.units).find(u => u.unitType === UnitType.WORKER && u.status === UnitStatus.IDLE && u.playerId === humanPlayer.id);
-                if (idleWorker) builders = [idleWorker];
-             }
+    if (pointerType === 'touch') {
+      const pointer = activePointerRef.current;
+      activePointerRef.current = null;
 
-             if (builders.length > 0) {
-                 dispatch({ 
-                     type: 'COMMAND_BUILD', 
-                     payload: { 
-                        workerIds: builders.map(b => b.id), 
-                        type: gameState.buildMode.type, 
-                        position: {x: e.point.x, y: 0, z: e.point.z} 
-                    } 
-                });
-             } else {
-                 // No workers available, maybe show a message later. For now, just cancel.
-                 dispatch({ type: 'SET_BUILD_MODE', payload: null });
-             }
-          } else {
-             // It's a simple click on the ground. Check for nearby units before deselecting.
-            const clickPoint = new THREE.Vector3(e.point.x, 0, e.point.z);
-            let clickedUnit: Unit | null = null;
-            let minDistanceSq = 1.5 * 1.5; // Click radius of 1.5 world units
+      selectionStartPoint.current = null;
+      setIsSelecting(false);
+      setSelectionBox(null);
 
-            for (const unit of Object.values(gameState.units)) {
-                if (unit.isDying) continue;
-                const unitPos = new THREE.Vector3(unit.position.x, 0, unit.position.z);
-                const distanceSq = clickPoint.distanceToSquared(unitPos);
-                if (distanceSq < minDistanceSq) {
-                    minDistanceSq = distanceSq;
-                    clickedUnit = unit;
-                }
-            }
+      if (!pointer || pointer.target !== 'ground') {
+        return;
+      }
 
-            if (clickedUnit) {
-                handleObjectClick(e, clickedUnit.id);
-            } else {
-                dispatch({ type: 'SELECT_OBJECT', payload: { id: null } });
-            }
+      const endX = e.nativeEvent?.offsetX ?? pointer.start.x;
+      const endY = e.nativeEvent?.offsetY ?? pointer.start.y;
+      const dragDistance = Math.hypot(endX - pointer.start.x, endY - pointer.start.y);
+      const moved = pointer.hasMoved || dragDistance > TOUCH_DRAG_THRESHOLD;
+
+      if (moved) {
+        return;
+      }
+
+      const pressDuration = Date.now() - pointer.startTime;
+
+      if (pressDuration >= LONG_PRESS_THRESHOLD) {
+        e.stopPropagation();
+        handleGroundContextMenu(e);
+      } else {
+        processGroundSimpleClick(e);
+      }
+      return;
+    }
+
+    if (e.button === 0 && selectionStartPoint.current) { // Left click release
+      const start = selectionStartPoint.current;
+      const end = { x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY };
+      const dragDistance = Math.hypot(end.x - start.x, end.y - start.y);
+
+      if (dragDistance < 10) {
+        processGroundSimpleClick(e);
+      } else {
+        const box = {
+          minX: Math.min(start.x, end.x),
+          maxX: Math.max(start.x, end.x),
+          minY: Math.min(start.y, end.y),
+          maxY: Math.max(start.y, end.y),
+        };
+
+        const allPlayerObjects = [...Object.values(gameState.units), ...Object.values(gameState.buildings)]
+          .filter(obj => obj.playerId === humanPlayer.id);
+
+        const objectsInBox = allPlayerObjects.filter(obj => {
+          const objPos = new THREE.Vector3(obj.position.x, obj.position.y, obj.position.z);
+          objPos.project(R3FCamera);
+          const screenX = (objPos.x * 0.5 + 0.5) * size.width;
+          const screenY = (objPos.y * -0.5 + 0.5) * size.height;
+          return screenX >= box.minX && screenX <= box.maxX && screenY >= box.minY && screenY <= box.maxY;
+        });
+
+        const unitsInBox = objectsInBox.filter(o => o.type === GameObjectType.UNIT) as Unit[];
+        const buildingsInBox = objectsInBox.filter(o => o.type === GameObjectType.BUILDING);
+
+        let finalSelection: (Unit | Building)[] = [];
+
+        if (unitsInBox.length > 0) {
+          finalSelection = unitsInBox;
+          const combatUnits = unitsInBox.filter(u => u.unitType !== UnitType.WORKER);
+          if (combatUnits.length > 0) {
+              finalSelection = combatUnits;
           }
-        } else { // It's a drag
-          const box = {
-            minX: Math.min(start.x, end.x),
-            maxX: Math.max(start.x, end.x),
-            minY: Math.min(start.y, end.y),
-            maxY: Math.max(start.y, end.y),
-          };
-          
-          const allPlayerObjects = [...Object.values(gameState.units), ...Object.values(gameState.buildings)]
-            .filter(obj => obj.playerId === humanPlayer.id);
-            
-          const objectsInBox = allPlayerObjects.filter(obj => {
-            const objPos = new THREE.Vector3(obj.position.x, obj.position.y, obj.position.z);
-            objPos.project(R3FCamera);
-            const screenX = (objPos.x * 0.5 + 0.5) * size.width;
-            const screenY = (objPos.y * -0.5 + 0.5) * size.height;
-            return screenX >= box.minX && screenX <= box.maxX && screenY >= box.minY && screenY <= box.maxY;
-          });
-
-          const unitsInBox = objectsInBox.filter(o => o.type === GameObjectType.UNIT) as Unit[];
-          const buildingsInBox = objectsInBox.filter(o => o.type === GameObjectType.BUILDING);
-          
-          let finalSelection: (Unit | Building)[] = [];
-
-          if (unitsInBox.length > 0) {
-            // Rule 1: Units are prioritized over buildings.
-            finalSelection = unitsInBox;
-            const combatUnits = unitsInBox.filter(u => u.unitType !== UnitType.WORKER);
-            if (combatUnits.length > 0) {
-                // Rule 2: If there are combat units, select only them.
-                finalSelection = combatUnits;
-            }
-          } else if (buildingsInBox.length > 0) {
-            // If no units are in the selection, select buildings.
-            finalSelection = buildingsInBox;
-          }
-
-          const finalSelectionIds = finalSelection.map(o => o.id);
-          
-          if (e.shiftKey) {
-            const currentSelection = new Set(gameState.selectedIds.filter(id => {
-                const obj = gameState.units[id] || gameState.buildings[id];
-                return obj && obj.playerId === humanPlayer.id;
-            }));
-            finalSelectionIds.forEach(id => currentSelection.add(id));
-            dispatch({ type: 'SET_SELECTION', payload: Array.from(currentSelection) });
-          } else {
-            dispatch({ type: 'SET_SELECTION', payload: finalSelectionIds });
-          }
+        } else if (buildingsInBox.length > 0) {
+          finalSelection = buildingsInBox;
         }
-        selectionStartPoint.current = null;
-        setIsSelecting(false);
-        setSelectionBox(null);
+
+        const finalSelectionIds = finalSelection.map(o => o.id);
+
+        if (e.shiftKey) {
+          const currentSelection = new Set(gameState.selectedIds.filter(id => {
+              const obj = gameState.units[id] || gameState.buildings[id];
+              return obj && obj.playerId === humanPlayer.id;
+          }));
+          finalSelectionIds.forEach(id => currentSelection.add(id));
+          dispatch({ type: 'SET_SELECTION', payload: Array.from(currentSelection) });
+        } else {
+          dispatch({ type: 'SET_SELECTION', payload: finalSelectionIds });
+        }
+      }
+      selectionStartPoint.current = null;
+      setIsSelecting(false);
+      setSelectionBox(null);
+    }
+  }, [R3FCamera, size, gameState, dispatch, setIsSelecting, setSelectionBox, gamePhase, humanPlayer, handleGroundContextMenu, processGroundSimpleClick]);
+
+  const handleGroundPointerCancel = useCallback(() => {
+    activePointerRef.current = null;
+    selectionStartPoint.current = null;
+    setIsSelecting(false);
+    setSelectionBox(null);
+  }, [setIsSelecting, setSelectionBox]);
+
+  const handleObjectPointerDown = useCallback((e: any, id: string) => {
+    e.stopPropagation();
+    const pointerType = getPointerType(e);
+
+    if (pointerType === 'touch') {
+      activePointerRef.current = {
+        target: 'object',
+        objectId: id,
+        pointerType,
+        start: { x: e.nativeEvent?.offsetX ?? 0, y: e.nativeEvent?.offsetY ?? 0 },
+        startTime: Date.now(),
+        hasMoved: false,
+      };
+    }
+  }, []);
+
+  const handleObjectPointerMove = useCallback((e: any, id: string) => {
+    e.stopPropagation();
+    const pointerType = getPointerType(e);
+    if (pointerType === 'touch' && activePointerRef.current && activePointerRef.current.target === 'object' && activePointerRef.current.objectId === id) {
+      const offsetX = e.nativeEvent?.offsetX ?? activePointerRef.current.start.x;
+      const offsetY = e.nativeEvent?.offsetY ?? activePointerRef.current.start.y;
+      const dragDistance = Math.hypot(offsetX - activePointerRef.current.start.x, offsetY - activePointerRef.current.start.y);
+      if (dragDistance > TOUCH_DRAG_THRESHOLD) {
+        activePointerRef.current.hasMoved = true;
       }
     }
-  }, [R3FCamera, size, gameState, dispatch, setIsSelecting, setSelectionBox, gamePhase, humanPlayer, handleObjectClick]);
+  }, []);
+
+  const handleObjectPointerUp = useCallback((e: any, id: string) => {
+    e.stopPropagation();
+    const pointerType = getPointerType(e);
+
+    if (pointerType === 'touch') {
+      const pointer = activePointerRef.current;
+      activePointerRef.current = null;
+
+      if (!pointer || pointer.target !== 'object' || pointer.objectId !== id) {
+        handleObjectClick(e, id);
+        return;
+      }
+
+      const endX = e.nativeEvent?.offsetX ?? pointer.start.x;
+      const endY = e.nativeEvent?.offsetY ?? pointer.start.y;
+      const dragDistance = Math.hypot(endX - pointer.start.x, endY - pointer.start.y);
+      const moved = pointer.hasMoved || dragDistance > TOUCH_DRAG_THRESHOLD;
+
+      if (moved) {
+        return;
+      }
+
+      const pressDuration = Date.now() - pointer.startTime;
+
+      if (pressDuration >= LONG_PRESS_THRESHOLD) {
+        handleObjectContextMenu(e, id);
+      } else {
+        handleObjectClick(e, id);
+      }
+      return;
+    }
+
+    if (e.button === 2) {
+      return;
+    }
+
+    if (e.button === 0) {
+      handleObjectClick(e, id);
+    }
+  }, [handleObjectClick, handleObjectContextMenu]);
+
+  const handleObjectPointerCancel = useCallback(() => {
+    if (activePointerRef.current?.target === 'object') {
+      activePointerRef.current = null;
+    }
+  }, []);
 
   const handleGroundContextMenu = useCallback((e: any) => {
     if (gamePhase !== 'playing' || !humanPlayer) return;
@@ -518,7 +682,17 @@ const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, s
       <InstancedRenderer gameState={gameState} selectedIds={selectedIdsSet} />
 
       {allBuildingsAndResources.map(obj => (
-        <group key={obj.id} onClick={(e) => handleObjectClick(e, obj.id)} onContextMenu={(e) => handleObjectContextMenu(e, obj.id)}>
+        <group
+          key={obj.id}
+          onPointerDown={(e) => handleObjectPointerDown(e, obj.id)}
+          onPointerUp={(e) => handleObjectPointerUp(e, obj.id)}
+          onPointerMove={(e) => handleObjectPointerMove(e, obj.id)}
+          onPointerCancel={handleObjectPointerCancel}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            handleObjectContextMenu(e, obj.id);
+          }}
+        >
           {obj.type === GameObjectType.BUILDING && obj.buildingType === BuildingType.TOWN_HALL && <TownHall object={obj as Building} isSelected={gameState.selectedIds.includes(obj.id)} gameState={gameState} />}
           {obj.type === GameObjectType.BUILDING && obj.buildingType === BuildingType.BARRACKS && <Barracks object={obj as Building} isSelected={gameState.selectedIds.includes(obj.id)} gameState={gameState} />}
           {obj.type === GameObjectType.BUILDING && obj.buildingType === BuildingType.HOUSE && <House object={obj as Building} isSelected={gameState.selectedIds.includes(obj.id)} gameState={gameState} />}
@@ -561,13 +735,14 @@ const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, s
       ))}
 
       <BuildingPlaceholder buildMode={gameState.buildMode} />
-      <Ground 
-        dispatch={dispatch} 
-        gameState={gameState} 
+      <Ground
+        dispatch={dispatch}
+        gameState={gameState}
         onPointerDown={handleGroundPointerDown}
         onPointerMove={handleGroundPointerMove}
         onPointerUp={handleGroundPointerUp}
         onContextMenu={handleGroundContextMenu}
+        onPointerCancel={handleGroundPointerCancel}
         />
     </>
   );

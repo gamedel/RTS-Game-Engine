@@ -10,6 +10,7 @@ import { MainMenu } from './components/ui/MainMenu';
 import { PauseMenu } from './components/ui/PauseMenu';
 import * as THREE from 'three';
 import { NavMeshManager } from './hooks/utils/navMeshManager';
+import { useIsTouchDevice } from './hooks/useIsTouchDevice';
 
 const GameStatusOverlay: React.FC<{ status: GameState['gameStatus'], onBackToMenu: () => void }> = ({ status, onBackToMenu }) => {
     const { t } = useLocalization();
@@ -61,6 +62,7 @@ function AppContent() {
   const cameraControlsRef = useRef<CameraControlsRef>(null);
   const [loadingMessage, setLoadingMessage] = useState<string | null>(null);
   const navMeshInitialized = useRef(false);
+  const isTouchDevice = useIsTouchDevice();
 
   useEffect(() => {
     if (gamePhase !== 'playing' || navMeshInitialized.current) {
@@ -143,10 +145,10 @@ function AppContent() {
       {gamePhase === 'playing' && !loadingMessage && <UI gameState={gameState} selectedObjects={selectedObjects} dispatch={dispatch} fps={fps} camera={camera} cameraControlsRef={cameraControlsRef} />}
       <div className="flex-grow relative">
         {gamePhase === 'playing' && isSelecting && <div style={selectionBoxStyle} />}
-        <Canvas 
-          camera={{ position: initialCameraPos, fov: 35 }} 
-          shadows={false} 
-          dpr={[1, 1.25]}
+        <Canvas
+          camera={{ position: initialCameraPos, fov: 35 }}
+          shadows={false}
+          dpr={isTouchDevice ? 1 : [1, 1.25]}
           gl={{ antialias: false, powerPreference: 'high-performance' }}
           onContextMenu={(e) => e.preventDefault()}
         >
