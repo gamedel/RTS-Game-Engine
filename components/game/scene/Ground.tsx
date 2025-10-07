@@ -75,9 +75,10 @@ type GroundProps = {
     onPointerMove: (e: any) => void;
     onPointerUp: (e: any) => void;
     onContextMenu: (e: any) => void;
+    onPointerCancel?: (e: any) => void;
 };
 
-export const Ground: React.FC<GroundProps> = ({ dispatch, gameState, onPointerDown, onPointerMove, onPointerUp, onContextMenu }) => {
+export const Ground: React.FC<GroundProps> = ({ dispatch, gameState, onPointerDown, onPointerMove, onPointerUp, onContextMenu, onPointerCancel }) => {
   // Empty useFrame to ensure R3F module is loaded for JSX augmentation
   useFrame(() => {});
 
@@ -92,11 +93,12 @@ export const Ground: React.FC<GroundProps> = ({ dispatch, gameState, onPointerDo
   return (
     <Plane 
       args={[300, 300]} 
-      rotation={[-Math.PI / 2, 0, 0]} 
+      rotation={[-Math.PI / 2, 0, 0]}
       onPointerDown={onPointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={onPointerUp}
       onContextMenu={onContextMenu}
+      onPointerCancel={onPointerCancel}
     >
       <meshStandardMaterial color="#4A6A44" />
     </Plane>

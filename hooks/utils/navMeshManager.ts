@@ -333,53 +333,68 @@ export const NavMeshManager = {
   },
 
   advanceOnNav(from: Vector3, to: Vector3, maxStep: number): Vector3 {
-    if (!navMeshQuery) return to;
+    const stepSize = Math.max(maxStep, 0.001);
+
+    const capToStep = (a: Vector3, b: Vector3, step: number): Vector3 => {
+      const dx = b.x - a.x;
+      const dz = b.z - a.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 <= step * step) {
+        return { x: b.x, y: 0, z: b.z };
+      }
+      const inv = 1 / Math.sqrt(Math.max(d2, 1e-12));
+      return { x: a.x + dx * inv * step, y: 0, z: a.z + dz * inv * step };
+    };
+
+    const linearStep = capToStep(from, to, stepSize);
+    if (!navMeshQuery) {
+      return linearStep;
+    }
+
     const he = {
       x: rcConfig.walkableRadius + 0.1,
       y: rcConfig.walkableHeight,
       z: rcConfig.walkableRadius + 0.1,
     };
-  
-    // 1) Start point must be on the mesh
-    const sRes: any = navMeshQuery.findClosestPoint(from, { halfExtents: he });
-    const s = sRes?.point ? { x: sRes.point.x, y: 0, z: sRes.point.z } : from;
-  
-    // 2) Try to move along the surface towards the waypoint
-    let prop: any = null;
+
+    let start = from;
     try {
-      prop = (navMeshQuery as any).moveAlongSurface
-        ? (navMeshQuery as any).moveAlongSurface(s, to, { halfExtents: he })
-        : null;
-    } catch { /* no-op */ }
-  
-    let p = prop?.result || prop?.point || prop?.position || prop || null;
-  
-    const capToStep = (a: Vector3, b: Vector3, step: number): Vector3 => {
-      const dx = b.x - a.x, dz = b.z - a.z;
-      const d2 = dx*dx + dz*dz;
-      if (d2 <= step*step) return { x: b.x, y: 0, z: b.z };
-      const inv = 1/Math.sqrt(Math.max(d2, 1e-12));
-      return { x: a.x + dx*inv*step, y: 0, z: a.z + dz*inv*step };
-    };
-  
-    // If moveAlongSurface gave a valid point, limit it to the step length
-    if (p && Number.isFinite(p.x) && Number.isFinite(p.z)) {
-      const limited = capToStep(s, { x: +p.x, y: 0, z: +p.z }, maxStep);
-  
-      // Protection against jumping to (0,0) with a distant target
-      const looksZero = (v: Vector3) => Math.abs(v.x) < 1e-6 && Math.abs(v.z) < 1e-6;
-      const farTarget2 = to.x*to.x + to.z*to.z;
-      if (looksZero(limited) && farTarget2 > 25*25) {
-        // Fallback: linear step + soft snap within step radius
-        const lin = capToStep(s, to, maxStep);
-        return this.safeSnap(lin, Math.max(maxStep*2, 0.5));
+      const sRes: any = navMeshQuery.findClosestPoint(from, { halfExtents: he });
+      if (sRes?.point) {
+        start = { x: sRes.point.x, y: 0, z: sRes.point.z };
       }
-      return limited;
+    } catch {
+      // Ignore clamp errors and fall back to the original start point
     }
-  
-    // 3) Fallback: linear step + soft snap
-    const lin = capToStep(s, to, maxStep);
-    return this.safeSnap(lin, Math.max(maxStep*2, 0.5));
+
+    const projected = capToStep(start, to, stepSize);
+    const snapped = this.safeSnap(projected, Math.max(stepSize * 2, 0.5));
+
+    const dx = snapped.x - start.x;
+    const dz = snapped.z - start.z;
+    const movedSq = dx * dx + dz * dz;
+    const looksZero = (v: Vector3) => Math.abs(v.x) < 1e-6 && Math.abs(v.z) < 1e-6;
+
+    if (movedSq < 1e-6) {
+      const alt = this.safeSnap(linearStep, Math.max(stepSize * 2, 0.5));
+      const altDx = alt.x - from.x;
+      const altDz = alt.z - from.z;
+      if (altDx * altDx + altDz * altDz >= 1e-6) {
+        return alt;
+      }
+      return linearStep;
+    }
+
+    const farTarget2 = to.x * to.x + to.z * to.z;
+    if (looksZero(snapped) && farTarget2 > 25 * 25) {
+      const alt = this.safeSnap(linearStep, Math.max(stepSize * 2, 0.5));
+      if (!looksZero(alt)) {
+        return alt;
+      }
+      return linearStep;
+    }
+
+    return snapped;
   },
 
   processQueue: () => {

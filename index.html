@@ -9,6 +9,15 @@
       body {
         margin: 0;
         overflow: hidden;
+        user-select: none;
+        -webkit-user-select: none;
+        -ms-user-select: none;
+        -webkit-touch-callout: none;
+      }
+      input, textarea {
+        user-select: text;
+        -webkit-user-select: text;
+        -ms-user-select: text;
       }
       .custom-scrollbar::-webkit-scrollbar {
         height: 6px;
@@ -36,8 +45,41 @@
       .custom-scrollbar-vertical::-webkit-scrollbar-thumb:hover {
         background: #718096; /* slate-500 */
       }
+      #boot-status {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+        transition: opacity 0.25s ease, transform 0.25s ease;
+        z-index: 9999;
+      }
+      #boot-status .boot-status__message {
+        pointer-events: auto;
+        min-width: 240px;
+        max-width: min(90vw, 420px);
+        border-radius: 0.75rem;
+        background: rgba(15, 23, 42, 0.9);
+        color: #e2e8f0;
+        padding: 1.25rem 1.5rem;
+        text-align: center;
+        font: 600 1rem/1.5 "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        box-shadow: 0 20px 45px rgba(15, 23, 42, 0.45);
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        backdrop-filter: blur(10px);
+      }
+      #boot-status.boot-status--hidden {
+        opacity: 0;
+        transform: translateY(12px);
+      }
+      #boot-status.boot-status--error .boot-status__message {
+        background: rgba(127, 29, 29, 0.92);
+        border-color: rgba(248, 113, 113, 0.65);
+        color: #fef2f2;
+      }
     </style>
-  <script type="importmap">
+    <script type="importmap">
 {
   "imports": {
     "react": "https://esm.sh/react@^19.1.1",
@@ -54,9 +96,281 @@
   }
 }
 </script>
-</head>
+  </head>
   <body>
+    <div id="boot-status">
+      <div class="boot-status__message">Loading game engine…</div>
+    </div>
     <div id="root"></div>
-    <script type="module" src="./index.tsx"></script>
+    <script>
+      (function setupBootStatus() {
+        var statusRoot = document.getElementById('boot-status');
+        if (!statusRoot) {
+          return;
+        }
+        var messageEl = statusRoot.querySelector('.boot-status__message');
+        if (!messageEl) {
+          return;
+        }
+        function show(message, isError) {
+          if (!statusRoot || !messageEl) {
+            return;
+          }
+          if (message) {
+            messageEl.textContent = message;
+          }
+          statusRoot.classList.toggle('boot-status--error', !!isError);
+          statusRoot.classList.remove('boot-status--hidden');
+        }
+        function hide() {
+          if (!statusRoot) {
+            return;
+          }
+          statusRoot.classList.remove('boot-status--error');
+          statusRoot.classList.add('boot-status--hidden');
+        }
+        function showError(message) {
+          show(message, true);
+        }
+        function wireGlobalHandlers() {
+          window.addEventListener('error', function handleWindowError(event) {
+            var errorMessage = event && event.message ? event.message : 'Unknown runtime error';
+            showError('Runtime error: ' + errorMessage);
+            if (event && event.error) {
+              console.error('Runtime error caught before boot completed', event.error);
+            }
+          });
+          window.addEventListener('unhandledrejection', function handleRejection(event) {
+            var reason = event && event.reason ? event.reason : 'Unknown promise rejection';
+            if (typeof reason === 'object' && reason && 'message' in reason) {
+              reason = reason.message;
+            }
+            showError('Unhandled promise rejection: ' + reason);
+            if (event && event.reason) {
+              console.error('Unhandled promise rejection before boot completed', event.reason);
+            }
+          });
+        }
+        window.__rtsBootStatus = {
+          show: show,
+          hide: hide,
+          error: showError,
+          wire: wireGlobalHandlers
+        };
+        wireGlobalHandlers();
+        show('Loading game engine…');
+      })();
+    </script>
+    <script>
+      (() => {
+        const boot = window.__rtsBootStatus;
+        const ENTRY_METADATA = 'metadata.json';
+
+        const resolveEntryScript = () => {
+          const existing = document.querySelector('script[data-entry="app-entry"]');
+          if (existing instanceof HTMLScriptElement) {
+            return existing;
+          }
+
+          const script = document.createElement('script');
+          script.type = 'module';
+          script.dataset.entry = 'app-entry';
+          script.setAttribute('crossorigin', '');
+          (document.body || document.documentElement || document).appendChild(script);
+          return script;
+        };
+
+        const entryScript = resolveEntryScript();
+
+        const normalizeBase = (value) => {
+          if (!value) {
+            return '/';
+          }
+          try {
+            const url = new URL(value, window.location.origin);
+            const pathname = url.pathname || '/';
+            return pathname.endsWith('/') ? pathname : pathname + '/';
+          } catch (error) {
+            return '/';
+          }
+        };
+
+        const collectBaseCandidates = () => {
+          const seenBases = new Set();
+          const candidates = [];
+
+          const baseTag = document.querySelector('base');
+          if (baseTag) {
+            const href = baseTag.getAttribute('href');
+            if (href) {
+              const normalized = normalizeBase(href);
+              if (!seenBases.has(normalized)) {
+                candidates.push(normalized);
+                seenBases.add(normalized);
+              }
+            }
+          }
+
+          const pathname = window.location.pathname || '/';
+          const trimmedPath = pathname.replace(/\/+$/, '');
+          const segments = trimmedPath.split('/').filter(Boolean);
+
+          for (let i = segments.length; i >= 0; i--) {
+            const slice = segments.slice(0, i);
+            const candidate = slice.length ? '/' + slice.join('/') + '/' : '/';
+            if (!seenBases.has(candidate)) {
+              candidates.push(candidate);
+              seenBases.add(candidate);
+            }
+          }
+
+          if (!seenBases.has('/')) {
+            candidates.push('/');
+            seenBases.add('/');
+          }
+
+          return candidates;
+        };
+
+        const ensureState = () => {
+          if (entryScript.__rtsLoaderState) {
+            return entryScript.__rtsLoaderState;
+          }
+
+          const state = {
+            assetPath: null,
+            baseCandidates: collectBaseCandidates(),
+            attemptIndex: 0,
+            attempted: new Set(),
+            metadataAttempts: new Set(),
+            metadataPromise: null,
+          };
+
+          entryScript.__rtsLoaderState = state;
+          return state;
+        };
+
+        const fetchMetadata = async (state) => {
+          if (state.metadataPromise) {
+            return state.metadataPromise;
+          }
+
+          state.metadataPromise = (async () => {
+            for (let i = 0; i < state.baseCandidates.length; i++) {
+              const basePath = state.baseCandidates[i];
+              const metadataUrl = new URL(
+                ENTRY_METADATA,
+                window.location.origin + basePath,
+              ).toString();
+
+              if (state.metadataAttempts.has(metadataUrl)) {
+                continue;
+              }
+
+              state.metadataAttempts.add(metadataUrl);
+
+              try {
+                const response = await fetch(metadataUrl, {
+                  cache: 'no-cache',
+                  credentials: 'same-origin',
+                });
+
+                if (!response.ok) {
+                  continue;
+                }
+
+                const metadata = await response.json();
+
+                if (!metadata || typeof metadata.entryBundle !== 'string') {
+                  continue;
+                }
+
+                const trimmed = metadata.entryBundle.trim();
+                if (!trimmed) {
+                  continue;
+                }
+
+                const normalizedAsset = trimmed.replace(/^\.\//, '').replace(/^\//, '');
+                state.assetPath = normalizedAsset;
+
+                // Prioritize the base path that successfully resolved metadata.
+                state.baseCandidates = [
+                  basePath,
+                  ...state.baseCandidates.filter((candidate) => candidate !== basePath),
+                ];
+                state.attemptIndex = 0;
+
+                return metadata;
+              } catch (error) {
+                console.error('Failed to load metadata from', metadataUrl, error);
+              }
+            }
+
+            throw new Error('Unable to locate game metadata.');
+          })();
+
+          return state.metadataPromise;
+        };
+
+        const nextAttempt = (state) => {
+          if (!state.assetPath) {
+            return false;
+          }
+
+          while (state.attemptIndex < state.baseCandidates.length) {
+            const basePath = state.baseCandidates[state.attemptIndex++];
+            const candidateUrl = new URL(
+              state.assetPath,
+              window.location.origin + basePath,
+            ).toString();
+
+            if (state.attempted.has(candidateUrl)) {
+              continue;
+            }
+
+            state.attempted.add(candidateUrl);
+
+            if (entryScript.src === candidateUrl || entryScript.getAttribute('src') === candidateUrl) {
+              continue;
+            }
+
+            boot?.show?.('Loading game files…');
+            entryScript.src = candidateUrl;
+            return true;
+          }
+
+          return false;
+        };
+
+        const startLoading = async () => {
+          const state = ensureState();
+
+          if (!state.assetPath) {
+            try {
+              await fetchMetadata(state);
+            } catch (error) {
+              console.error(error);
+              boot?.error?.('Failed to find game files. Please refresh the page.');
+              return;
+            }
+          }
+
+          if (!nextAttempt(state)) {
+            boot?.error?.('Failed to load game files. Please refresh the page.');
+          }
+        };
+
+        entryScript.addEventListener('error', (event) => {
+          const state = ensureState();
+          console.error('Failed to load app entry script', entryScript.src, event);
+
+          if (!nextAttempt(state)) {
+            boot?.error?.('Failed to load game files. Please refresh the page.');
+          }
+        });
+
+        startLoading();
+      })();
+    </script>
   </body>
 </html>
