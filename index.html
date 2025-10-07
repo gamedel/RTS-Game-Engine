@@ -157,11 +157,21 @@
         const boot = window.__rtsBootStatus;
         const ENTRY_METADATA = 'metadata.json';
 
-        const entryScript = document.querySelector('script[data-entry="app-entry"]');
-        if (!(entryScript instanceof HTMLScriptElement)) {
-          boot?.error?.('Failed to initialize game loader. Please refresh the page.');
-          return;
-        }
+        const resolveEntryScript = () => {
+          const existing = document.querySelector('script[data-entry="app-entry"]');
+          if (existing instanceof HTMLScriptElement) {
+            return existing;
+          }
+
+          const script = document.createElement('script');
+          script.type = 'module';
+          script.dataset.entry = 'app-entry';
+          script.setAttribute('crossorigin', '');
+          (document.body || document.documentElement || document).appendChild(script);
+          return script;
+        };
+
+        const entryScript = resolveEntryScript();
 
         const normalizeBase = (value) => {
           if (!value) {
@@ -353,6 +363,5 @@
         startLoading();
       })();
     </script>
-    <script data-entry="app-entry" type="module" crossorigin></script>
   </body>
 </html>
