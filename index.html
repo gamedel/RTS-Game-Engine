@@ -9,6 +9,15 @@
       body {
         margin: 0;
         overflow: hidden;
+        user-select: none;
+        -webkit-user-select: none;
+        -ms-user-select: none;
+        -webkit-touch-callout: none;
+      }
+      input, textarea {
+        user-select: text;
+        -webkit-user-select: text;
+        -ms-user-select: text;
       }
       .custom-scrollbar::-webkit-scrollbar {
         height: 6px;
