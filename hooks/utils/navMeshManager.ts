@@ -23,6 +23,7 @@ type NavState = {
   matrix: number[][] | null;
   obstacles: Map<string, number[]>;
   agentPadding: number;
+  maxSearchRadius: number;
   diagnostics: {
     lastSearchMs: number;
     lastSearchExpanded: number;
@@ -38,7 +39,6 @@ const HALF_WORLD = WORLD_SIZE / 2;
 const CELL_SIZE = 0.5;
 const SAMPLE_STEP = CELL_SIZE * 0.5;
 const MAX_QUEUE_BATCH = 24;
-const MAX_SEARCH_RADIUS_CELLS = 512;
 const EPSILON = 1e-4;
 
 const now = typeof performance !== 'undefined' ? () => performance.now() : () => Date.now();
@@ -52,6 +52,7 @@ const navState: NavState = {
   matrix: null,
   obstacles: new Map(),
   agentPadding: 0,
+  maxSearchRadius: 0,
   diagnostics: {
     lastSearchMs: 0,
     lastSearchExpanded: 0,
@@ -322,7 +323,12 @@ const getNeighbors = (cell: Cell): Cell[] => {
   return neighbors;
 };
 
-const findNearestWalkableCell = (start: Cell | null, maxDistance = MAX_SEARCH_RADIUS_CELLS): Cell | null => {
+const getMaxSearchRadius = () => {
+  if (!navState.grid) return 0;
+  return navState.maxSearchRadius || Math.ceil(Math.hypot(navState.grid.width, navState.grid.height));
+};
+
+const findNearestWalkableCell = (start: Cell | null, maxDistance = getMaxSearchRadius()): Cell | null => {
   if (!start) return null;
   if (!navState.grid) return null;
 
@@ -504,8 +510,6 @@ const solvePath = (start: Cell, goal: Cell): PathSolution => {
       const stepCost = diagonal ? Math.SQRT2 : 1;
       const tentativeG = current.g + stepCost;
 
-      if (tentativeG > MAX_SEARCH_RADIUS_CELLS) continue;
-
       const existing = gScores.get(neighborIdx);
       if (existing !== undefined && tentativeG >= existing - EPSILON) {
         continue;
@@ -545,6 +549,9 @@ const handlePathFailure = (unitId: string, reason: string) => {
     pending: pendingRequests.size,
     queueDepth: requestQueue.length
   });
+  if (typeof process !== 'undefined' && process.env && process.env.NODE_ENV !== 'production') {
+    console.warn(`[NavMesh] Path request for ${unitId} failed: ${reason}`);
+  }
   if (!navState.dispatch) return;
   navState.dispatch({
     type: 'UPDATE_UNIT',
@@ -713,6 +720,7 @@ export const NavMeshManager = {
     navState.obstacles.clear();
     requestQueue.length = 0;
     pendingRequests.clear();
+    navState.maxSearchRadius = 0;
     updateDiagnostics({
       lastSearchMs: 0,
       lastSearchExpanded: 0,
@@ -747,6 +755,7 @@ export const NavMeshManager = {
     navState.occupancy.fill(0);
     navState.matrix = Array.from({ length: height }, () => new Array(width).fill(0));
     navState.obstacles.clear();
+    navState.maxSearchRadius = Math.ceil(Math.hypot(width, height));
 
     const unitRadii = Object.values(COLLISION_DATA.UNITS).map(u => u.radius);
     const maxUnitRadius = unitRadii.length ? Math.max(...unitRadii) : 0.5;
