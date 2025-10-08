@@ -2,57 +2,91 @@ import type { Dispatch } from 'react';
 import { Building, ResourceNode, Vector3, Action, UnitStatus } from '../../types';
 import { COLLISION_DATA } from '../../constants';
 
-type PathRequest = { unitId: string; startPos: Vector3; endPos: Vector3 };
+const WORLD_SIZE = 320;
+const HALF_WORLD = WORLD_SIZE / 2;
+const CELL_SIZE = 0.6; // finer granularity than the previous grid
+const MAX_QUEUE_BATCH = 16;
+const MAX_SEARCH_RADIUS = 64; // cells
+const MAX_PATH_EXPANSIONS = 16000;
 
-type Grid = {
+const EPSILON = 1e-4;
+
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+
+const clampToWorld = (p: Vector3): Vector3 => ({
+  x: clamp(p.x, -HALF_WORLD + 0.25, HALF_WORLD - 0.25),
+  y: 0,
+  z: clamp(p.z, -HALF_WORLD + 0.25, HALF_WORLD - 0.25)
+});
+
+type PathRequest = { unitId: string; start: Vector3; goal: Vector3 };
+
+type Cell = { cx: number; cz: number };
+
+type NavigationGrid = {
   cellSize: number;
   width: number;
   height: number;
   originX: number;
   originZ: number;
   walkable: Uint8Array;
+};
+
+type NavState = {
+  dispatch: Dispatch<Action> | null;
+  ready: boolean;
+  grid: NavigationGrid | null;
+  occupancy: Uint16Array | null;
+  obstacles: Map<string, number[]>;
   agentPadding: number;
 };
 
-type Cell = { cx: number; cz: number };
-
-const WORLD_SIZE = 320;
-const CELL_SIZE = 0.75;
-const HALF_WORLD = WORLD_SIZE / 2;
-const MAX_FINDER_EXPANSION = 48; // cells (~36m)
-const MAX_QUEUE_BATCH = 12;
-
-const MAX_UNIT_RADIUS = Math.max(
-  ...Object.values(COLLISION_DATA.UNITS).map(u => u.radius)
-);
+const navState: NavState = {
+  dispatch: null,
+  ready: false,
+  grid: null,
+  occupancy: null,
+  obstacles: new Map(),
+  agentPadding: 0
+};
 
 const requestQueue: PathRequest[] = [];
 const pendingRequests = new Set<string>();
-let dispatchRef: Dispatch<Action> | null = null;
-let ready = false;
-let grid: Grid | null = null;
 
-const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+const encodeCell = (cell: Cell) => `${cell.cx}|${cell.cz}`;
 
-const d2 = (a: Vector3, b: Vector3) => {
+const equalVec = (a: Vector3, b: Vector3, eps = EPSILON) => {
   const dx = a.x - b.x;
   const dz = a.z - b.z;
-  return dx * dx + dz * dz;
+  return dx * dx + dz * dz <= eps * eps;
 };
 
-const equalVec = (a: Vector3, b: Vector3, eps = 1e-4) => d2(a, b) <= eps * eps;
-
-const makeGrid = (agentPadding: number): Grid => {
+const createGrid = (agentPadding: number): NavigationGrid => {
   const width = Math.ceil(WORLD_SIZE / CELL_SIZE);
   const height = Math.ceil(WORLD_SIZE / CELL_SIZE);
   const originX = -HALF_WORLD;
   const originZ = -HALF_WORLD;
   const walkable = new Uint8Array(width * height);
   walkable.fill(1);
-  return { cellSize: CELL_SIZE, width, height, originX, originZ, walkable, agentPadding };
+
+  navState.occupancy = new Uint16Array(width * height);
+  navState.occupancy.fill(0);
+  navState.obstacles.clear();
+
+  navState.agentPadding = agentPadding;
+
+  return {
+    cellSize: CELL_SIZE,
+    width,
+    height,
+    originX,
+    originZ,
+    walkable
+  };
 };
 
 const worldToCell = (x: number, z: number): Cell | null => {
+  const grid = navState.grid;
   if (!grid) return null;
   const cx = Math.floor((x - grid.originX) / grid.cellSize);
   const cz = Math.floor((z - grid.originZ) / grid.cellSize);
@@ -61,85 +95,195 @@ const worldToCell = (x: number, z: number): Cell | null => {
 };
 
 const cellToWorld = ({ cx, cz }: Cell): Vector3 => {
+  const grid = navState.grid;
   if (!grid) return { x: 0, y: 0, z: 0 };
   const x = grid.originX + (cx + 0.5) * grid.cellSize;
   const z = grid.originZ + (cz + 0.5) * grid.cellSize;
   return { x, y: 0, z };
 };
 
-const indexForCell = ({ cx, cz }: Cell) => cz * (grid?.width ?? 0) + cx;
-
-const isCellWalkable = (cell: Cell | null): boolean => {
-  if (!grid || !cell) return false;
-  if (cell.cx < 0 || cell.cz < 0 || cell.cx >= grid.width || cell.cz >= grid.height) return false;
-  return grid.walkable[indexForCell(cell)] === 1;
+const indexForCell = ({ cx, cz }: Cell) => {
+  const grid = navState.grid;
+  if (!grid) return -1;
+  return cz * grid.width + cx;
 };
 
-const setCellBlocked = (cell: Cell) => {
-  if (!grid) return;
-  if (cell.cx < 0 || cell.cz < 0 || cell.cx >= grid.width || cell.cz >= grid.height) return;
-  grid.walkable[indexForCell(cell)] = 0;
+const isCellInside = (cell: Cell) => {
+  const grid = navState.grid;
+  if (!grid) return false;
+  return cell.cx >= 0 && cell.cz >= 0 && cell.cx < grid.width && cell.cz < grid.height;
 };
 
-const setRectBlocked = (minX: number, maxX: number, minZ: number, maxZ: number, padding: number) => {
-  if (!grid) return;
-  const pad = padding + grid.agentPadding;
-  const minCx = Math.floor(((minX - pad) - grid.originX) / grid.cellSize);
-  const maxCx = Math.floor(((maxX + pad) - grid.originX) / grid.cellSize);
-  const minCz = Math.floor(((minZ - pad) - grid.originZ) / grid.cellSize);
-  const maxCz = Math.floor(((maxZ + pad) - grid.originZ) / grid.cellSize);
+const isCellWalkable = (cell: Cell | null) => {
+  const grid = navState.grid;
+  const occupancy = navState.occupancy;
+  if (!grid || !occupancy || !cell) return false;
+  if (!isCellInside(cell)) return false;
+  const idx = indexForCell(cell);
+  return idx >= 0 ? occupancy[idx] === 0 : false;
+};
 
+const setOccupancy = (index: number, delta: number) => {
+  const grid = navState.grid;
+  const occupancy = navState.occupancy;
+  if (!grid || !occupancy || index < 0 || index >= occupancy.length) return;
+  const next = Math.max(0, occupancy[index] + delta);
+  occupancy[index] = next;
+  grid.walkable[index] = next === 0 ? 1 : 0;
+};
+
+const markCells = (id: string, cells: number[]) => {
+  navState.obstacles.set(id, cells);
+  cells.forEach(idx => setOccupancy(idx, +1));
+};
+
+const unmarkCells = (id: string) => {
+  const cells = navState.obstacles.get(id);
+  if (!cells) return;
+  cells.forEach(idx => setOccupancy(idx, -1));
+  navState.obstacles.delete(id);
+};
+
+const eachCellInRect = (minX: number, maxX: number, minZ: number, maxZ: number): number[] => {
+  const grid = navState.grid;
+  if (!grid) return [];
+
+  const minCx = Math.floor((minX - grid.originX) / grid.cellSize);
+  const maxCx = Math.floor((maxX - grid.originX) / grid.cellSize);
+  const minCz = Math.floor((minZ - grid.originZ) / grid.cellSize);
+  const maxCz = Math.floor((maxZ - grid.originZ) / grid.cellSize);
+
+  const cells: number[] = [];
   for (let cz = minCz; cz <= maxCz; cz++) {
     for (let cx = minCx; cx <= maxCx; cx++) {
-      setCellBlocked({ cx, cz });
+      if (cx < 0 || cz < 0 || cx >= grid.width || cz >= grid.height) continue;
+      cells.push(cz * grid.width + cx);
     }
   }
+  return cells;
 };
 
-const setCircleBlocked = (centerX: number, centerZ: number, radius: number, padding: number) => {
-  if (!grid) return;
-  const pad = radius + padding + grid.agentPadding;
-  const minCx = Math.floor(((centerX - pad) - grid.originX) / grid.cellSize);
-  const maxCx = Math.floor(((centerX + pad) - grid.originX) / grid.cellSize);
-  const minCz = Math.floor(((centerZ - pad) - grid.originZ) / grid.cellSize);
-  const maxCz = Math.floor(((centerZ + pad) - grid.originZ) / grid.cellSize);
-  const radSq = pad * pad;
+const eachCellInCircle = (centerX: number, centerZ: number, radius: number): number[] => {
+  const grid = navState.grid;
+  if (!grid) return [];
 
+  const minCx = Math.floor(((centerX - radius) - grid.originX) / grid.cellSize);
+  const maxCx = Math.floor(((centerX + radius) - grid.originX) / grid.cellSize);
+  const minCz = Math.floor(((centerZ - radius) - grid.originZ) / grid.cellSize);
+  const maxCz = Math.floor(((centerZ + radius) - grid.originZ) / grid.cellSize);
+  const radiusSq = radius * radius;
+
+  const cells: number[] = [];
   for (let cz = minCz; cz <= maxCz; cz++) {
     for (let cx = minCx; cx <= maxCx; cx++) {
+      if (cx < 0 || cz < 0 || cx >= grid.width || cz >= grid.height) continue;
       const world = cellToWorld({ cx, cz });
       const dx = world.x - centerX;
       const dz = world.z - centerZ;
-      if (dx * dx + dz * dz <= radSq) {
-        setCellBlocked({ cx, cz });
+      if (dx * dx + dz * dz <= radiusSq) {
+        cells.push(cz * grid.width + cx);
       }
     }
   }
+  return cells;
 };
 
-const clampToWorld = (p: Vector3): Vector3 => ({
-  x: clamp(p.x, -HALF_WORLD + 0.25, HALF_WORLD - 0.25),
-  y: 0,
-  z: clamp(p.z, -HALF_WORLD + 0.25, HALF_WORLD - 0.25),
-});
+const registerBuildingObstacle = (building: Building) => {
+  const size = COLLISION_DATA.BUILDINGS[building.buildingType];
+  if (!size) return;
+  const pad = navState.agentPadding + 0.35;
+  const halfW = size.width / 2 + pad;
+  const halfD = size.depth / 2 + pad;
+  const minX = building.position.x - halfW;
+  const maxX = building.position.x + halfW;
+  const minZ = building.position.z - halfD;
+  const maxZ = building.position.z + halfD;
+  const id = `building:${building.id}`;
+  unmarkCells(id);
+  markCells(id, eachCellInRect(minX, maxX, minZ, maxZ));
+};
 
-type HeapNode = { cell: Cell; g: number; f: number; parent?: string };
+const registerResourceObstacle = (resource: ResourceNode) => {
+  const info = COLLISION_DATA.RESOURCES[resource.resourceType];
+  if (!info) return;
+  const pad = navState.agentPadding + 0.25;
+  const radius = info.radius + pad;
+  const id = `resource:${resource.id}`;
+  unmarkCells(id);
+  markCells(id, eachCellInCircle(resource.position.x, resource.position.z, radius));
+};
 
-const encodeCell = (cell: Cell) => `${cell.cx}|${cell.cz}`;
-const decodeCell = (key: string): Cell => {
-  const [x, z] = key.split('|');
-  return { cx: Number(x), cz: Number(z) };
+const rebuildStaticObstacles = (buildings: Record<string, Building>, resources: Record<string, ResourceNode>) => {
+  const grid = navState.grid;
+  const occupancy = navState.occupancy;
+  if (!grid || !occupancy) return;
+
+  occupancy.fill(0);
+  grid.walkable.fill(1);
+  navState.obstacles.clear();
+
+  Object.values(buildings).forEach(building => {
+    if (building.constructionProgress !== undefined) return;
+    registerBuildingObstacle(building);
+  });
+
+  Object.values(resources).forEach(registerResourceObstacle);
+};
+
+const neighborOffsets: Array<{ cx: number; cz: number; cost: number }> = [
+  { cx: 1, cz: 0, cost: 1 },
+  { cx: -1, cz: 0, cost: 1 },
+  { cx: 0, cz: 1, cost: 1 },
+  { cx: 0, cz: -1, cost: 1 },
+  { cx: 1, cz: 1, cost: Math.SQRT2 },
+  { cx: 1, cz: -1, cost: Math.SQRT2 },
+  { cx: -1, cz: 1, cost: Math.SQRT2 },
+  { cx: -1, cz: -1, cost: Math.SQRT2 }
+];
+
+const heuristic = (a: Cell, b: Cell) => {
+  const dx = Math.abs(a.cx - b.cx);
+  const dz = Math.abs(a.cz - b.cz);
+  return (Math.max(dx, dz) + (Math.SQRT2 - 1) * Math.min(dx, dz)) * CELL_SIZE;
+};
+
+const hasLineOfSight = (from: Cell, to: Cell) => {
+  if (!navState.grid) return false;
+  let x0 = from.cx;
+  let z0 = from.cz;
+  const x1 = to.cx;
+  const z1 = to.cz;
+  const dx = Math.abs(x1 - x0);
+  const dz = Math.abs(z1 - z0);
+  const sx = x0 < x1 ? 1 : -1;
+  const sz = z0 < z1 ? 1 : -1;
+  let err = dx - dz;
+
+  while (true) {
+    if (!isCellWalkable({ cx: x0, cz: z0 })) return false;
+    if (x0 === x1 && z0 === z1) break;
+    const e2 = err * 2;
+    if (e2 > -dz) {
+      err -= dz;
+      x0 += sx;
+    }
+    if (e2 < dx) {
+      err += dx;
+      z0 += sz;
+    }
+  }
+  return true;
 };
 
 class MinHeap {
-  private data: HeapNode[] = [];
+  private data: Array<{ key: string; cell: Cell; g: number; f: number; parent?: string }> = [];
 
-  push(node: HeapNode) {
+  push(node: { key: string; cell: Cell; g: number; f: number; parent?: string }) {
     this.data.push(node);
     this.bubbleUp(this.data.length - 1);
   }
 
-  pop(): HeapNode | undefined {
+  pop() {
     if (this.data.length === 0) return undefined;
     const root = this.data[0];
     const last = this.data.pop()!;
@@ -169,7 +313,6 @@ class MinHeap {
       let left = index * 2 + 1;
       let right = left + 1;
       let smallest = index;
-
       if (left < length && this.data[left].f < this.data[smallest].f) smallest = left;
       if (right < length && this.data[right].f < this.data[smallest].f) smallest = right;
       if (smallest === index) break;
@@ -179,359 +322,376 @@ class MinHeap {
   }
 }
 
-const neighborsOffsets: Cell[] = [
-  { cx: -1, cz: 0 },
-  { cx: 1, cz: 0 },
-  { cx: 0, cz: -1 },
-  { cx: 0, cz: 1 },
-  { cx: -1, cz: -1 },
-  { cx: -1, cz: 1 },
-  { cx: 1, cz: -1 },
-  { cx: 1, cz: 1 },
-];
-
-const heuristic = (a: Cell, b: Cell) => {
-  const dx = Math.abs(a.cx - b.cx);
-  const dz = Math.abs(a.cz - b.cz);
-  return (Math.max(dx, dz) + (Math.SQRT2 - 1) * Math.min(dx, dz)) * (grid?.cellSize ?? 1);
-};
-
-const reconstructPath = (came: Map<string, HeapNode>, endKey: string): Cell[] => {
-  const out: Cell[] = [];
-  let currentKey: string | undefined = endKey;
-  while (currentKey) {
-    const node = came.get(currentKey);
+const reconstructPath = (records: Map<string, { key: string; cell: Cell; parent?: string }>, endKey: string) => {
+  const path: Cell[] = [];
+  let current: string | undefined = endKey;
+  while (current) {
+    const node = records.get(current);
     if (!node) break;
-    out.push(node.cell);
-    currentKey = node.parent;
+    path.push(node.cell);
+    current = node.parent;
   }
-  return out.reverse();
+  return path.reverse();
 };
 
-const canTraverseDiagonal = (base: Cell, offset: Cell): boolean => {
-  if (!grid) return false;
-  if (offset.cx === 0 || offset.cz === 0) return true;
-  const a: Cell = { cx: base.cx + offset.cx, cz: base.cz };
-  const b: Cell = { cx: base.cx, cz: base.cz + offset.cz };
-  return isCellWalkable(a) && isCellWalkable(b);
-};
+const findNearestWalkableCell = (origin: Cell | null, maxRadius: number): Cell | null => {
+  if (!origin) return null;
+  if (isCellWalkable(origin)) return origin;
 
-const runAStar = (start: Cell, goal: Cell): Cell[] => {
-  if (!grid) return [];
-  const startKey = encodeCell(start);
-  const goalKey = encodeCell(goal);
-  const open = new MinHeap();
-  const came = new Map<string, HeapNode>();
-  const gScore = new Map<string, number>();
-  const closed = new Set<string>();
-
-  const startNode: HeapNode = { cell: start, g: 0, f: heuristic(start, goal), parent: undefined };
-  open.push(startNode);
-  came.set(startKey, startNode);
-  gScore.set(startKey, 0);
-
-  while (open.size) {
-    const current = open.pop()!;
-    const currentKey = encodeCell(current.cell);
-    if (currentKey === goalKey) {
-      return reconstructPath(came, currentKey);
-    }
-
-    closed.add(currentKey);
-
-    for (const offset of neighborsOffsets) {
-      const neighbor: Cell = { cx: current.cell.cx + offset.cx, cz: current.cell.cz + offset.cz };
-      const neighborKey = encodeCell(neighbor);
-
-      if (!isCellWalkable(neighbor) || closed.has(neighborKey)) continue;
-      if (!canTraverseDiagonal(current.cell, offset)) continue;
-
-      const cost = (offset.cx === 0 || offset.cz === 0 ? grid.cellSize : grid.cellSize * Math.SQRT2);
-      const tentativeG = current.g + cost;
-      const existingG = gScore.get(neighborKey);
-      if (existingG !== undefined && tentativeG >= existingG) continue;
-
-      const node: HeapNode = {
-        cell: neighbor,
-        g: tentativeG,
-        f: tentativeG + heuristic(neighbor, goal),
-        parent: currentKey,
-      };
-      came.set(neighborKey, node);
-      gScore.set(neighborKey, tentativeG);
-      open.push(node);
-    }
-  }
-
-  return [];
-};
-
-const isWorldWalkable = (x: number, z: number) => isCellWalkable(worldToCell(x, z));
-
-const traceLine = (from: Vector3, to: Vector3): Vector3 => {
-  if (!grid) return to;
-  const clampedTo = clampToWorld(to);
-  const dx = clampedTo.x - from.x;
-  const dz = clampedTo.z - from.z;
-  const distance = Math.sqrt(dx * dx + dz * dz);
-  if (distance < 1e-6) return clampToWorld(from);
-
-  const step = grid.cellSize * 0.4;
-  const iterations = Math.max(1, Math.ceil(distance / step));
-  let last = clampToWorld(from);
-
-  for (let i = 1; i <= iterations; i++) {
-    const t = i / iterations;
-    const x = from.x + dx * t;
-    const z = from.z + dz * t;
-    if (isWorldWalkable(x, z)) {
-      last = { x, y: 0, z };
-    } else {
-      break;
-    }
-  }
-
-  return clampToWorld(last);
-};
-
-const hasLineOfSight = (from: Vector3, to: Vector3) => equalVec(traceLine(from, to), clampToWorld(to));
-
-const findNearestWalkableWorld = (target: Vector3, maxDistance: number): Vector3 | null => {
-  if (!grid) return null;
-  const startCell = worldToCell(target.x, target.z);
-  const maxCells = Math.max(1, Math.ceil(maxDistance / grid.cellSize));
   const visited = new Set<string>();
-  const queue: { cell: Cell; dist: number }[] = [];
-
-  if (startCell) {
-    const key = encodeCell(startCell);
-    queue.push({ cell: startCell, dist: 0 });
-    visited.add(key);
-    if (isCellWalkable(startCell)) {
-      return cellToWorld(startCell);
-    }
-  }
+  const queue: Array<{ cell: Cell; dist: number }> = [{ cell: origin, dist: 0 }];
+  visited.add(encodeCell(origin));
 
   let qi = 0;
   while (qi < queue.length) {
     const { cell, dist } = queue[qi++];
-    if (dist > maxCells) continue;
+    if (dist > maxRadius) continue;
 
-    for (const offset of neighborsOffsets) {
+    for (const offset of neighborOffsets) {
       const next: Cell = { cx: cell.cx + offset.cx, cz: cell.cz + offset.cz };
+      if (!isCellInside(next)) continue;
       const key = encodeCell(next);
       if (visited.has(key)) continue;
       visited.add(key);
       const nd = dist + 1;
-      if (nd > maxCells) continue;
+      if (nd > maxRadius) continue;
       if (isCellWalkable(next)) {
-        return cellToWorld(next);
+        return next;
       }
       queue.push({ cell: next, dist: nd });
     }
   }
-
   return null;
 };
 
-const sanitizePath = (points: Vector3[], start: Vector3, goal: Vector3): Vector3[] => {
-  const clean = points.filter(p => Number.isFinite(p.x) && Number.isFinite(p.z));
-  if (!clean.length) return clean;
-
-  const simplified: Vector3[] = [clean[0]];
-  let anchor = clean[0];
-  for (let i = 1; i < clean.length; i++) {
-    const candidate = clean[i];
+const smoothCells = (cells: Cell[]): Cell[] => {
+  if (cells.length <= 2) return cells;
+  const smooth: Cell[] = [cells[0]];
+  let anchor = cells[0];
+  for (let i = 1; i < cells.length - 1; i++) {
+    const candidate = cells[i + 1];
     if (!hasLineOfSight(anchor, candidate)) {
-      simplified.push(clean[i - 1]);
-      anchor = clean[i - 1];
+      smooth.push(cells[i]);
+      anchor = cells[i];
     }
   }
-  const last = clean[clean.length - 1];
-  if (!equalVec(simplified[simplified.length - 1], last)) {
-    simplified.push(last);
-  }
+  smooth.push(cells[cells.length - 1]);
+  return smooth;
+};
 
-  if (!hasLineOfSight(simplified[simplified.length - 1], goal)) {
-    simplified.push(goal);
-  } else if (!equalVec(simplified[simplified.length - 1], goal)) {
-    simplified[simplified.length - 1] = goal;
-  }
+const runAStar = (start: Cell, goal: Cell): Cell[] => {
+  const open = new MinHeap();
+  const records = new Map<string, { key: string; cell: Cell; g: number; f: number; parent?: string }>();
+  const gScore = new Map<string, number>();
+  const closed = new Set<string>();
 
-  if (simplified.length && equalVec(simplified[0], start)) {
-    simplified.shift();
-  }
+  const startKey = encodeCell(start);
+  open.push({ key: startKey, cell: start, g: 0, f: heuristic(start, goal) });
+  records.set(startKey, { key: startKey, cell: start });
+  gScore.set(startKey, 0);
 
-  const dedup: Vector3[] = [];
-  for (const p of simplified) {
-    if (!dedup.length || !equalVec(dedup[dedup.length - 1], p)) {
-      dedup.push({ x: p.x, y: 0, z: p.z });
+  let expansions = 0;
+
+  while (open.size && expansions < MAX_PATH_EXPANSIONS) {
+    const current = open.pop()!;
+    const currentKey = current.key;
+
+    if (currentKey === encodeCell(goal)) {
+      return smoothCells(reconstructPath(records, currentKey));
+    }
+
+    if (closed.has(currentKey)) continue;
+    closed.add(currentKey);
+    expansions++;
+
+    for (const offset of neighborOffsets) {
+      const neighbor: Cell = { cx: current.cell.cx + offset.cx, cz: current.cell.cz + offset.cz };
+      if (!isCellWalkable(neighbor)) continue;
+
+      const neighborKey = encodeCell(neighbor);
+      if (closed.has(neighborKey)) continue;
+
+      const stepCost = offset.cost * CELL_SIZE;
+      const tentativeG = current.g + stepCost;
+      const prevBest = gScore.get(neighborKey);
+      if (prevBest !== undefined && tentativeG >= prevBest) continue;
+
+      const parentKey = current.parent && hasLineOfSight(records.get(current.parent)!.cell, neighbor)
+        ? current.parent
+        : currentKey;
+
+      const f = tentativeG + heuristic(neighbor, goal);
+      gScore.set(neighborKey, tentativeG);
+      records.set(neighborKey, { key: neighborKey, cell: neighbor, parent: parentKey });
+      open.push({ key: neighborKey, cell: neighbor, g: tentativeG, f, parent: parentKey });
     }
   }
-  return dedup;
+  return [];
+};
+
+const computePath = (start: Vector3, goal: Vector3): Vector3[] => {
+  const grid = navState.grid;
+  if (!grid) return [];
+
+  const startCell = findNearestWalkableCell(worldToCell(start.x, start.z), MAX_SEARCH_RADIUS);
+  const goalCell = findNearestWalkableCell(worldToCell(goal.x, goal.z), MAX_SEARCH_RADIUS);
+
+  if (!startCell || !goalCell) return [];
+
+  if (encodeCell(startCell) === encodeCell(goalCell)) {
+    const snappedGoal = cellToWorld(goalCell);
+    return equalVec(snappedGoal, start) ? [] : [snappedGoal];
+  }
+
+  const cells = runAStar(startCell, goalCell);
+  if (!cells.length) return [];
+
+  const worldPoints = cells.map(cellToWorld);
+
+  const filtered: Vector3[] = [];
+  for (const point of worldPoints) {
+    const last = filtered[filtered.length - 1];
+    if (!last || !equalVec(last, point)) {
+      filtered.push(point);
+    }
+  }
+
+  const goalClamped = clampToWorld(goal);
+  const lastPoint = filtered[filtered.length - 1];
+  if (!lastPoint) {
+    filtered.push(goalClamped);
+  } else if (!equalVec(lastPoint, goalClamped)) {
+    if (hasLineOfSight(cells[cells.length - 1], goalCell)) {
+      filtered[filtered.length - 1] = goalClamped;
+    } else {
+      filtered.push(goalClamped);
+    }
+  }
+
+  if (filtered.length && equalVec(filtered[0], start)) {
+    filtered.shift();
+  }
+
+  return filtered.map(p => ({ x: p.x, y: 0, z: p.z }));
+};
+
+const binarySearchStep = (from: Vector3, to: Vector3): Vector3 => {
+  const steps = 6;
+  let lo = 0;
+  let hi = 1;
+  let best = 0;
+  for (let i = 0; i < steps; i++) {
+    const mid = (lo + hi) * 0.5;
+    const candidate = {
+      x: from.x + (to.x - from.x) * mid,
+      y: 0,
+      z: from.z + (to.z - from.z) * mid
+    };
+    if (isCellWalkable(worldToCell(candidate.x, candidate.z))) {
+      best = mid;
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return {
+    x: from.x + (to.x - from.x) * best,
+    y: 0,
+    z: from.z + (to.z - from.z) * best
+  };
+};
+
+const trySideStep = (from: Vector3, dirX: number, dirZ: number, maxStep: number): Vector3 => {
+  const magnitude = Math.sqrt(dirX * dirX + dirZ * dirZ);
+  if (magnitude < EPSILON) return from;
+  const normX = dirX / magnitude;
+  const normZ = dirZ / magnitude;
+  const desired = {
+    x: from.x + normX * maxStep,
+    y: 0,
+    z: from.z + normZ * maxStep
+  };
+  if (isCellWalkable(worldToCell(desired.x, desired.z))) {
+    return clampToWorld(desired);
+  }
+  return clampToWorld(binarySearchStep(from, desired));
+};
+
+const projectMoveInternal = (from: Vector3, to: Vector3): Vector3 => {
+  const clampedTarget = clampToWorld(to);
+  if (isCellWalkable(worldToCell(clampedTarget.x, clampedTarget.z))) {
+    return clampedTarget;
+  }
+  const projected = binarySearchStep(from, clampedTarget);
+  if (!equalVec(projected, from)) return clampToWorld(projected);
+
+  // try to slide along perpendicular directions (left/right relative to travel direction)
+  const dx = clampedTarget.x - from.x;
+  const dz = clampedTarget.z - from.z;
+  const left = trySideStep(from, -dz, dx, Math.hypot(dx, dz));
+  if (!equalVec(left, from)) return left;
+  const right = trySideStep(from, dz, -dx, Math.hypot(dx, dz));
+  if (!equalVec(right, from)) return right;
+
+  return clampToWorld(from);
+};
+
+const advanceOnNavInternal = (from: Vector3, to: Vector3, maxStep: number): Vector3 => {
+  const dx = to.x - from.x;
+  const dz = to.z - from.z;
+  const dist = Math.sqrt(dx * dx + dz * dz);
+  if (dist < EPSILON) return clampToWorld(from);
+
+  const step = Math.min(dist, Math.max(maxStep, 0.001));
+  const desired = {
+    x: from.x + (dx / dist) * step,
+    y: 0,
+    z: from.z + (dz / dist) * step
+  };
+
+  const projected = projectMove(from, desired);
+  if (!equalVec(projected, from)) return projected;
+
+  // Try slight detours forward-left / forward-right
+  const angle = Math.PI / 8;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const forwardX = dx / dist;
+  const forwardZ = dz / dist;
+
+  const leftX = forwardX * cos - forwardZ * sin;
+  const leftZ = forwardX * sin + forwardZ * cos;
+  const leftStep = trySideStep(from, leftX, leftZ, step * 0.9);
+  if (!equalVec(leftStep, from)) return leftStep;
+
+  const rightX = forwardX * cos + forwardZ * sin;
+  const rightZ = -forwardX * sin + forwardZ * cos;
+  const rightStep = trySideStep(from, rightX, rightZ, step * 0.9);
+  if (!equalVec(rightStep, from)) return rightStep;
+
+  return clampToWorld(from);
+};
+
+const safeSnapInternal = (target: Vector3, maxSnapDistance: number): Vector3 => {
+  const grid = navState.grid;
+  if (!grid) return clampToWorld(target);
+
+  const maxCells = Math.ceil(maxSnapDistance / grid.cellSize);
+  const nearest = findNearestWalkableCell(worldToCell(target.x, target.z), maxCells);
+  return nearest ? clampToWorld(cellToWorld(nearest)) : clampToWorld(target);
+};
+
+const snapToNavInternal = (point: Vector3): Vector3 => {
+  const nearest = findNearestWalkableCell(worldToCell(point.x, point.z), MAX_SEARCH_RADIUS);
+  return nearest ? clampToWorld(cellToWorld(nearest)) : clampToWorld(point);
+};
+
+const handlePathFailure = (unitId: string) => {
+  if (!navState.dispatch) return;
+  navState.dispatch({
+    type: 'UPDATE_UNIT',
+    payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE, path: undefined, pathIndex: undefined }
+  });
+};
+
+const processNextRequest = () => {
+  const req = requestQueue.shift();
+  if (!req) return;
+
+  const { unitId, start, goal } = req;
+  try {
+    const clampedStart = clampToWorld(start);
+    const clampedGoal = clampToWorld(goal);
+    const path = computePath(clampedStart, clampedGoal);
+
+    if (!navState.dispatch) return;
+
+    if (!path.length) {
+      if (isCellWalkable(worldToCell(clampedGoal.x, clampedGoal.z))) {
+        navState.dispatch({ type: 'UPDATE_UNIT', payload: { id: unitId, path: [clampedGoal], pathIndex: 0 } });
+      } else {
+        handlePathFailure(unitId);
+      }
+      return;
+    }
+
+    navState.dispatch({ type: 'UPDATE_UNIT', payload: { id: unitId, path, pathIndex: 0 } });
+  } catch (err) {
+    console.error('[NavMeshManager] Failed to compute path', err);
+    handlePathFailure(unitId);
+  } finally {
+    pendingRequests.delete(unitId);
+  }
 };
 
 export const NavMeshManager = {
-  init: async (dispatch: Dispatch<Action>) => {
-    dispatchRef = dispatch;
-    ready = false;
+  async init(dispatch: Dispatch<Action>) {
+    navState.dispatch = dispatch;
+    navState.ready = false;
   },
 
-  isReady: () => ready,
-
-  buildNavMesh: async (buildings: Record<string, Building>, resourcesNodes: Record<string, ResourceNode>) => {
-    const agentPadding = MAX_UNIT_RADIUS + 0.3;
-    grid = makeGrid(agentPadding);
-
-    Object.values(buildings).forEach(building => {
-      if (building.constructionProgress !== undefined) return;
-      const size = COLLISION_DATA.BUILDINGS[building.buildingType];
-      if (!size) return;
-      const halfW = size.width * 0.5;
-      const halfD = size.depth * 0.5;
-      setRectBlocked(
-        building.position.x - halfW,
-        building.position.x + halfW,
-        building.position.z - halfD,
-        building.position.z + halfD,
-        0
-      );
-    });
-
-    Object.values(resourcesNodes).forEach(resource => {
-      const info = COLLISION_DATA.RESOURCES[resource.resourceType];
-      if (!info) return;
-      setCircleBlocked(resource.position.x, resource.position.z, info.radius, 0.2);
-    });
-
-    ready = true;
+  isReady() {
+    return navState.ready;
   },
 
-  addObstacle: (_b: Building) => {},
-  removeObstacle: (_b: Building) => {},
+  async buildNavMesh(buildings: Record<string, Building>, resources: Record<string, ResourceNode>) {
+    const maxUnitRadius = Math.max(...Object.values(COLLISION_DATA.UNITS).map(u => u.radius));
+    navState.grid = createGrid(maxUnitRadius + 0.3);
+    rebuildStaticObstacles(buildings, resources);
+    navState.ready = true;
+  },
 
-  requestPath: (unitId: string, startPos: Vector3, endPos: Vector3) => {
-    if (!ready || pendingRequests.has(unitId)) return;
+  addObstacle(building: Building) {
+    if (!navState.grid || building.constructionProgress !== undefined) return;
+    registerBuildingObstacle(building);
+  },
+
+  removeObstacle(building: Building) {
+    if (!navState.grid) return;
+    unmarkCells(`building:${building.id}`);
+  },
+
+  requestPath(unitId: string, startPos: Vector3, endPos: Vector3) {
+    if (!navState.ready || pendingRequests.has(unitId)) return;
     pendingRequests.add(unitId);
-    requestQueue.push({ unitId, startPos, endPos });
+    requestQueue.push({ unitId, start: { ...startPos, y: 0 }, goal: { ...endPos, y: 0 } });
   },
 
-  isRequestPending: (unitId: string) => pendingRequests.has(unitId),
-
-  projectMove: (from: Vector3, to: Vector3): Vector3 => {
-    if (!grid) return clampToWorld(to);
-
-    const attempt = traceLine(from, to);
-    if (!equalVec(attempt, from)) return attempt;
-
-    const horizontal = traceLine(from, { x: to.x, y: 0, z: from.z });
-    if (!equalVec(horizontal, from)) return horizontal;
-
-    const vertical = traceLine(from, { x: from.x, y: 0, z: to.z });
-    if (!equalVec(vertical, from)) return vertical;
-
-    return clampToWorld(from);
+  isRequestPending(unitId: string) {
+    return pendingRequests.has(unitId);
   },
 
-  snapToNav: (p: Vector3): Vector3 => {
-    if (!grid) return clampToWorld(p);
-    if (isWorldWalkable(p.x, p.z)) return clampToWorld(p);
-    const nearest = findNearestWalkableWorld(p, grid.cellSize * MAX_FINDER_EXPANSION);
-    return nearest ? clampToWorld(nearest) : clampToWorld(p);
+  projectMove(from: Vector3, to: Vector3) {
+    return projectMoveInternal(from, to);
   },
 
-  safeSnap(to: Vector3, maxSnapDist: number): Vector3 {
-    if (!grid) return clampToWorld(to);
-    const nearest = findNearestWalkableWorld(to, maxSnapDist);
-    return nearest ? clampToWorld(nearest) : clampToWorld(to);
+  snapToNav(point: Vector3) {
+    return snapToNavInternal(point);
   },
 
-  advanceOnNav(from: Vector3, to: Vector3, maxStep: number): Vector3 {
-    const stepSize = Math.max(maxStep, 0.001);
-    const dx = to.x - from.x;
-    const dz = to.z - from.z;
-    const dist = Math.sqrt(dx * dx + dz * dz);
-    if (dist < 1e-9) return clampToWorld(from);
-
-    const scale = Math.min(1, stepSize / dist);
-    const desired = { x: from.x + dx * scale, y: 0, z: from.z + dz * scale };
-    const projected = this.projectMove(from, desired);
-
-    if (!equalVec(projected, from)) {
-      return clampToWorld(projected);
-    }
-
-    const safe = this.safeSnap(desired, Math.max(stepSize * 2, grid ? grid.cellSize * 2 : 1));
-    if (!equalVec(safe, from)) {
-      return clampToWorld(safe);
-    }
-
-    return clampToWorld(from);
+  safeSnap(point: Vector3, maxSnapDistance: number) {
+    return safeSnapInternal(point, maxSnapDistance);
   },
 
-  processQueue: () => {
-    if (!ready || !dispatchRef || !grid) return;
+  advanceOnNav(from: Vector3, to: Vector3, maxStep: number) {
+    return advanceOnNavInternal(from, to, maxStep);
+  },
 
-    for (let n = 0; n < MAX_QUEUE_BATCH; n++) {
-      const req = requestQueue.shift();
-      if (!req) break;
-
-      const { unitId, startPos, endPos } = req;
-
-      try {
-        const startSnapped = this.snapToNav(clampToWorld(startPos));
-        const goalSnapped = this.snapToNav(clampToWorld(endPos));
-
-        const startCell = worldToCell(startSnapped.x, startSnapped.z);
-        const goalCell = worldToCell(goalSnapped.x, goalSnapped.z);
-
-        if (!startCell || !goalCell) {
-          dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
-          continue;
-        }
-
-        if (encodeCell(startCell) === encodeCell(goalCell)) {
-          dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path: [goalSnapped], pathIndex: 0 } });
-          continue;
-        }
-
-        let cells = runAStar(startCell, goalCell);
-        if (!cells.length) {
-          if (hasLineOfSight(startSnapped, goalSnapped)) {
-            dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path: [goalSnapped], pathIndex: 0 } });
-          } else {
-            dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
-          }
-          continue;
-        }
-
-        const worldPoints = cells.map(cellToWorld);
-        const sanitized = sanitizePath(worldPoints, startSnapped, goalSnapped);
-
-        if (!sanitized.length) {
-          if (hasLineOfSight(startSnapped, goalSnapped)) {
-            dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path: [goalSnapped], pathIndex: 0 } });
-          } else {
-            dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
-          }
-          continue;
-        }
-
-        dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, path: sanitized, pathIndex: 0 } });
-      } catch (err) {
-        console.error('[NavMeshManager] Failed to create path for', unitId, err);
-        dispatchRef({ type: 'UPDATE_UNIT', payload: { id: unitId, pathTarget: undefined, status: UnitStatus.IDLE } });
-      } finally {
-        pendingRequests.delete(unitId);
-      }
+  processQueue() {
+    if (!navState.ready) return;
+    for (let i = 0; i < MAX_QUEUE_BATCH; i++) {
+      if (!requestQueue.length) break;
+      processNextRequest();
     }
   },
 
-  terminate: () => {
-    dispatchRef = null;
+  terminate() {
+    navState.dispatch = null;
+    navState.ready = false;
+    navState.grid = null;
+    navState.occupancy = null;
+    navState.obstacles.clear();
     requestQueue.length = 0;
     pendingRequests.clear();
-    ready = false;
-    grid = null;
   }
 };
