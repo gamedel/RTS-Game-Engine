@@ -163,6 +163,32 @@ function AppContent() {
     };
   }, [gamePhase, dispatch, gameState.buildings, gameState.resourcesNodes]);
 
+  useEffect(() => {
+    if (gamePhase !== 'playing') {
+      setStatusMessage('Ready');
+      return;
+    }
+
+    const updateStatus = () => {
+      const diag = NavMeshManager.getDiagnostics();
+      const base = `Nav queue: ${diag.queueDepth} queued / ${diag.pending} pending`;
+      if (!diag.lastSearchResult) {
+        setStatusMessage(prev => (prev === base ? prev : base));
+        return;
+      }
+      const detail = `${diag.lastSearchResult} in ${diag.lastSearchMs.toFixed(2)}ms (expanded ${diag.lastSearchExpanded})`;
+      const reason = diag.lastFailureReason ? ` – last error: ${diag.lastFailureReason}` : '';
+      const summary = `${base} — ${detail}${reason}`;
+      setStatusMessage(prev => (prev === summary ? prev : summary));
+    };
+
+    updateStatus();
+    const interval = window.setInterval(updateStatus, 750);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [gamePhase]);
+
   const selectedObjects = useMemo(() => {
     const allObjects = { ...gameState.units, ...gameState.buildings, ...gameState.resourcesNodes };
     return gameState.selectedIds.map(id => allObjects[id]).filter(Boolean) as GameObject[];

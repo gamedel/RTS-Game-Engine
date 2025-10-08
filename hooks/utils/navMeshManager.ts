@@ -1,5 +1,4 @@
 import type { Dispatch } from 'react';
-import EasyStar from 'easystarjs';
 import { Building, ResourceNode, Vector3, Action, UnitStatus } from '../../types';
 import { COLLISION_DATA } from '../../constants';
 
@@ -15,9 +14,6 @@ type NavigationGrid = {
   originZ: number;
 };
 
-type EasyStarInstance = InstanceType<typeof EasyStar.js>;
-type InflightRequest = PathRequest & { startCell: Cell; goalCell: Cell };
-
 type NavState = {
   dispatch: Dispatch<Action> | null;
   ready: boolean;
@@ -27,8 +23,14 @@ type NavState = {
   matrix: number[][] | null;
   obstacles: Map<string, number[]>;
   agentPadding: number;
-  pathfinder: EasyStarInstance | null;
-  inflight: Map<string, InflightRequest>;
+  diagnostics: {
+    lastSearchMs: number;
+    lastSearchExpanded: number;
+    lastSearchResult: 'success' | 'partial' | 'failed' | null;
+    lastFailureReason: string | null;
+    queueDepth: number;
+    pending: number;
+  };
 };
 
 const WORLD_SIZE = 320;
@@ -36,10 +38,10 @@ const HALF_WORLD = WORLD_SIZE / 2;
 const CELL_SIZE = 0.5;
 const SAMPLE_STEP = CELL_SIZE * 0.5;
 const MAX_QUEUE_BATCH = 24;
-const MAX_SEARCH_RADIUS_CELLS = 96;
-const SOLVER_CALLS_PER_FRAME = 6;
-const PATH_ITERATIONS_PER_CALC = 8000;
+const MAX_SEARCH_RADIUS_CELLS = 512;
 const EPSILON = 1e-4;
+
+const now = typeof performance !== 'undefined' ? () => performance.now() : () => Date.now();
 
 const navState: NavState = {
   dispatch: null,
@@ -50,12 +52,78 @@ const navState: NavState = {
   matrix: null,
   obstacles: new Map(),
   agentPadding: 0,
-  pathfinder: null,
-  inflight: new Map()
+  diagnostics: {
+    lastSearchMs: 0,
+    lastSearchExpanded: 0,
+    lastSearchResult: null,
+    lastFailureReason: null,
+    queueDepth: 0,
+    pending: 0
+  }
 };
 
 const requestQueue: PathRequest[] = [];
 const pendingRequests = new Set<string>();
+
+type HeapNode = {
+  idx: number;
+  cell: Cell;
+  g: number;
+  f: number;
+};
+
+class MinHeap {
+  private data: HeapNode[] = [];
+
+  get size() {
+    return this.data.length;
+  }
+
+  push(node: HeapNode) {
+    this.data.push(node);
+    this.bubbleUp(this.data.length - 1);
+  }
+
+  pop(): HeapNode | undefined {
+    if (this.data.length === 0) return undefined;
+    const root = this.data[0];
+    const last = this.data.pop()!;
+    if (this.data.length > 0) {
+      this.data[0] = last;
+      this.bubbleDown(0);
+    }
+    return root;
+  }
+
+  private bubbleUp(index: number) {
+    while (index > 0) {
+      const parent = (index - 1) >> 1;
+      if (this.data[parent].f <= this.data[index].f) break;
+      [this.data[parent], this.data[index]] = [this.data[index], this.data[parent]];
+      index = parent;
+    }
+  }
+
+  private bubbleDown(index: number) {
+    const length = this.data.length;
+    while (true) {
+      const left = index * 2 + 1;
+      const right = left + 1;
+      let smallest = index;
+
+      if (left < length && this.data[left].f < this.data[smallest].f) {
+        smallest = left;
+      }
+      if (right < length && this.data[right].f < this.data[smallest].f) {
+        smallest = right;
+      }
+
+      if (smallest === index) break;
+      [this.data[index], this.data[smallest]] = [this.data[smallest], this.data[index]];
+      index = smallest;
+    }
+  }
+}
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
@@ -72,11 +140,10 @@ type ReadyNavState = NavState & {
   walkable: Uint8Array;
   occupancy: Uint16Array;
   matrix: number[][];
-  pathfinder: EasyStarInstance;
 };
 
 const isGridReady = (): navState is ReadyNavState => {
-  return !!(navState.grid && navState.walkable && navState.occupancy && navState.matrix && navState.pathfinder);
+  return !!(navState.grid && navState.walkable && navState.occupancy && navState.matrix);
 };
 
 const worldToCell = (x: number, z: number): Cell | null => {
@@ -338,49 +405,146 @@ const simplifyCells = (cells: Cell[]): Cell[] => {
   return result;
 };
 
-const deliverPathResult = (unitId: string, nodes: { x: number; y: number }[] | null) => {
-  const inflight = navState.inflight.get(unitId);
-  navState.inflight.delete(unitId);
-  pendingRequests.delete(unitId);
-
-  if (!inflight) return;
-  if (!navState.dispatch || !isGridReady()) return;
-
-  if (!nodes || nodes.length === 0) {
-    if (isWorldWalkable(inflight.goal)) {
-      navState.dispatch({ type: 'UPDATE_UNIT', payload: { id: unitId, path: [clampToWorld(inflight.goal)], pathIndex: 0 } });
-    } else {
-      handlePathFailure(unitId);
-    }
-    return;
-  }
-
-  const cells = nodes.map(({ x, y }) => ({ cx: x, cz: y }));
-  const simplified = simplifyCells(cells);
-  const waypoints = simplified.map(cell => clampToWorld(cellToWorld(cell)));
-
-  if (!waypoints.length) {
-    if (isWorldWalkable(inflight.goal)) {
-      navState.dispatch({ type: 'UPDATE_UNIT', payload: { id: unitId, path: [clampToWorld(inflight.goal)], pathIndex: 0 } });
-    } else {
-      handlePathFailure(unitId);
-    }
-    return;
-  }
-
-  const last = waypoints[waypoints.length - 1];
-  const dx = inflight.goal.x - last.x;
-  const dz = inflight.goal.z - last.z;
-  if (dx * dx + dz * dz > 1e-3 && isWorldWalkable(inflight.goal)) {
-    waypoints.push(clampToWorld(inflight.goal));
-  }
-
-  navState.dispatch({ type: 'UPDATE_UNIT', payload: { id: unitId, path: waypoints, pathIndex: 0 } });
+const heuristic = (a: Cell, b: Cell) => {
+  const dx = Math.abs(a.cx - b.cx);
+  const dz = Math.abs(a.cz - b.cz);
+  const min = Math.min(dx, dz);
+  const max = Math.max(dx, dz);
+  return min * Math.SQRT2 + (max - min);
 };
 
-const handlePathFailure = (unitId: string) => {
+const reconstructPath = (parents: Map<number, number>, startIdx: number, endIdx: number): Cell[] | null => {
+  if (!navState.grid) return null;
+  const path: Cell[] = [];
+  let current = endIdx;
+  const guard = new Set<number>();
+  while (true) {
+    const cell = cellFromIndex(current);
+    if (!cell) return null;
+    path.push(cell);
+    if (current === startIdx) break;
+    const parent = parents.get(current);
+    if (parent === undefined) return null;
+    if (guard.has(parent)) return null;
+    guard.add(parent);
+    current = parent;
+  }
+  path.reverse();
+  return path;
+};
+
+type PathSolution = {
+  cells: Cell[];
+  reachedGoal: boolean;
+  expanded: number;
+  elapsedMs: number;
+  failureReason?: string;
+};
+
+const solvePath = (start: Cell, goal: Cell): PathSolution => {
+  if (!isGridReady()) {
+    return { cells: [], reachedGoal: false, expanded: 0, elapsedMs: 0, failureReason: 'nav-grid-not-ready' };
+  }
+
+  const startIdx = indexForCell(start);
+  const goalIdx = indexForCell(goal);
+  if (startIdx < 0 || goalIdx < 0) {
+    return { cells: [], reachedGoal: false, expanded: 0, elapsedMs: 0, failureReason: 'invalid-indices' };
+  }
+
+  const open = new MinHeap();
+  const gScores = new Map<number, number>();
+  const parents = new Map<number, number>();
+  const closed = new Set<number>();
+
+  const startTime = now();
+
+  open.push({ idx: startIdx, cell: start, g: 0, f: heuristic(start, goal) });
+  gScores.set(startIdx, 0);
+  parents.set(startIdx, startIdx);
+
+  let bestIdx = startIdx;
+  let bestHeuristic = heuristic(start, goal);
+  let expanded = 0;
+
+  while (open.size > 0) {
+    const current = open.pop()!;
+    if (closed.has(current.idx)) continue;
+    closed.add(current.idx);
+    expanded++;
+
+    const currentHeuristic = heuristic(current.cell, goal);
+    if (currentHeuristic < bestHeuristic) {
+      bestHeuristic = currentHeuristic;
+      bestIdx = current.idx;
+    }
+
+    if (current.idx === goalIdx) {
+      const path = reconstructPath(parents, startIdx, current.idx) ?? [];
+      return { cells: path, reachedGoal: true, expanded, elapsedMs: now() - startTime };
+    }
+
+    for (const neighbor of getNeighbors(current.cell)) {
+      const neighborIdx = indexForCell(neighbor);
+      if (neighborIdx < 0) continue;
+      if (closed.has(neighborIdx)) continue;
+      if (!isCellWalkable(neighbor)) continue;
+
+      const dx = neighbor.cx - current.cell.cx;
+      const dz = neighbor.cz - current.cell.cz;
+      const diagonal = dx !== 0 && dz !== 0;
+      if (diagonal) {
+        const gateA = { cx: current.cell.cx + dx, cz: current.cell.cz };
+        const gateB = { cx: current.cell.cx, cz: current.cell.cz + dz };
+        if (!isCellWalkable(gateA) || !isCellWalkable(gateB)) {
+          continue;
+        }
+      }
+
+      const stepCost = diagonal ? Math.SQRT2 : 1;
+      const tentativeG = current.g + stepCost;
+
+      if (tentativeG > MAX_SEARCH_RADIUS_CELLS) continue;
+
+      const existing = gScores.get(neighborIdx);
+      if (existing !== undefined && tentativeG >= existing - EPSILON) {
+        continue;
+      }
+
+      gScores.set(neighborIdx, tentativeG);
+      parents.set(neighborIdx, current.idx);
+      const fScore = tentativeG + heuristic(neighbor, goal);
+      open.push({ idx: neighborIdx, cell: neighbor, g: tentativeG, f: fScore });
+    }
+  }
+
+  const fallback = reconstructPath(parents, startIdx, bestIdx) ?? [];
+  const elapsedMs = now() - startTime;
+  if (fallback.length > 1) {
+    return { cells: fallback, reachedGoal: false, expanded, elapsedMs };
+  }
+
+  return {
+    cells: [],
+    reachedGoal: false,
+    expanded,
+    elapsedMs,
+    failureReason: 'no-path-found'
+  };
+};
+
+const updateDiagnostics = (updates: Partial<NavState['diagnostics']>) => {
+  navState.diagnostics = { ...navState.diagnostics, ...updates };
+};
+
+const handlePathFailure = (unitId: string, reason: string) => {
   pendingRequests.delete(unitId);
-  navState.inflight.delete(unitId);
+  updateDiagnostics({
+    lastSearchResult: 'failed',
+    lastFailureReason: reason,
+    pending: pendingRequests.size,
+    queueDepth: requestQueue.length
+  });
   if (!navState.dispatch) return;
   navState.dispatch({
     type: 'UPDATE_UNIT',
@@ -392,6 +556,58 @@ const handlePathFailure = (unitId: string) => {
       status: UnitStatus.IDLE
     }
   });
+};
+
+const applySolution = (
+  unitId: string,
+  goal: Vector3,
+  startCell: Cell,
+  solution: PathSolution
+) => {
+  pendingRequests.delete(unitId);
+  updateDiagnostics({
+    lastSearchMs: solution.elapsedMs,
+    lastSearchExpanded: solution.expanded,
+    lastSearchResult: solution.reachedGoal ? 'success' : solution.cells.length > 0 ? 'partial' : 'failed',
+    lastFailureReason: solution.failureReason ?? null,
+    pending: pendingRequests.size,
+    queueDepth: requestQueue.length
+  });
+
+  if (!navState.dispatch || !isGridReady()) return;
+
+  if (!solution.cells.length) {
+    handlePathFailure(unitId, solution.failureReason ?? 'no-path');
+    return;
+  }
+
+  const simplified = simplifyCells(solution.cells);
+  const trimmed = simplified.filter((cell, index) => !(index === 0 && cell.cx === startCell.cx && cell.cz === startCell.cz));
+  const waypoints = trimmed.map(cell => clampToWorld(cellToWorld(cell)));
+
+  if (!waypoints.length && isWorldWalkable(goal)) {
+    waypoints.push(clampToWorld(goal));
+  }
+
+  if (!waypoints.length) {
+    handlePathFailure(unitId, 'empty-waypoints');
+    return;
+  }
+
+  const last = waypoints[waypoints.length - 1];
+  const dx = goal.x - last.x;
+  const dz = goal.z - last.z;
+  const distSq = dx * dx + dz * dz;
+
+  if (solution.reachedGoal) {
+    if (distSq > 1e-3) {
+      waypoints.push(clampToWorld(goal));
+    }
+  } else if (distSq > 1e-3 && isWorldWalkable(goal)) {
+    waypoints.push(clampToWorld(goal));
+  }
+
+  navState.dispatch({ type: 'UPDATE_UNIT', payload: { id: unitId, path: waypoints, pathIndex: 0, pathTarget: clampToWorld(goal) } });
 };
 
 const processNextRequest = () => {
@@ -407,48 +623,32 @@ const processNextRequest = () => {
   const goalCell = findNearestWalkableCell(worldToCell(clampedGoal.x, clampedGoal.z));
 
   if (!startCell || !goalCell) {
-    pendingRequests.delete(unitId);
-    handlePathFailure(unitId);
+    handlePathFailure(unitId, 'missing-start-or-goal');
     return;
   }
 
   if (startCell.cx === goalCell.cx && startCell.cz === goalCell.cz) {
-    pendingRequests.delete(unitId);
     if (isWorldWalkable(clampedGoal)) {
       if (navState.dispatch) {
-        navState.dispatch({ type: 'UPDATE_UNIT', payload: { id: unitId, path: [clampedGoal], pathIndex: 0 } });
+        pendingRequests.delete(unitId);
+        updateDiagnostics({
+          lastSearchMs: 0,
+          lastSearchExpanded: 0,
+          lastSearchResult: 'success',
+          lastFailureReason: null,
+          pending: pendingRequests.size,
+          queueDepth: requestQueue.length
+        });
+        navState.dispatch({ type: 'UPDATE_UNIT', payload: { id: unitId, path: [clampedGoal], pathIndex: 0, pathTarget: clampedGoal } });
       }
     } else {
-      handlePathFailure(unitId);
+      handlePathFailure(unitId, 'goal-not-walkable');
     }
     return;
   }
 
-  const inflight: InflightRequest = {
-    unitId,
-    start: clampedStart,
-    goal: clampedGoal,
-    startCell,
-    goalCell
-  };
-
-  navState.inflight.set(unitId, inflight);
-  try {
-    navState.pathfinder.findPath(
-      startCell.cx,
-      startCell.cz,
-      goalCell.cx,
-      goalCell.cz,
-      path => {
-        deliverPathResult(unitId, path as { x: number; y: number }[] | null);
-      }
-    );
-  } catch (err) {
-    console.error('[NavMeshManager] Failed to schedule path', err);
-    navState.inflight.delete(unitId);
-    pendingRequests.delete(unitId);
-    handlePathFailure(unitId);
-  }
+  const solution = solvePath(startCell, goalCell);
+  applySolution(unitId, clampedGoal, startCell, solution);
 };
 
 const projectMoveInternal = (from: Vector3, to: Vector3): Vector3 => {
@@ -511,10 +711,16 @@ export const NavMeshManager = {
     navState.occupancy = null;
     navState.matrix = null;
     navState.obstacles.clear();
-    navState.pathfinder = null;
-    navState.inflight.clear();
     requestQueue.length = 0;
     pendingRequests.clear();
+    updateDiagnostics({
+      lastSearchMs: 0,
+      lastSearchExpanded: 0,
+      lastSearchResult: null,
+      lastFailureReason: null,
+      queueDepth: 0,
+      pending: 0
+    });
   },
 
   isReady() {
@@ -546,16 +752,6 @@ export const NavMeshManager = {
     const maxUnitRadius = unitRadii.length ? Math.max(...unitRadii) : 0.5;
     navState.agentPadding = maxUnitRadius + 0.25;
 
-    navState.pathfinder = new EasyStar.js();
-    navState.pathfinder.setGrid(navState.matrix);
-    navState.pathfinder.setAcceptableTiles([0]);
-    navState.pathfinder.enableDiagonals();
-    navState.pathfinder.setIterationsPerCalculation(PATH_ITERATIONS_PER_CALC);
-    // @ts-expect-error - type definitions are outdated and miss these helpers
-    if (typeof navState.pathfinder.disableCornerCutting === 'function') {
-      navState.pathfinder.disableCornerCutting();
-    }
-
     rebuildStaticObstacles(buildings, resources);
     navState.ready = true;
   },
@@ -574,6 +770,7 @@ export const NavMeshManager = {
     if (!navState.ready || pendingRequests.has(unitId)) return;
     pendingRequests.add(unitId);
     requestQueue.push({ unitId, start: { ...startPos, y: 0 }, goal: { ...endPos, y: 0 } });
+    updateDiagnostics({ queueDepth: requestQueue.length, pending: pendingRequests.size });
   },
 
   isRequestPending(unitId: string) {
@@ -597,17 +794,11 @@ export const NavMeshManager = {
   },
 
   processQueue() {
-    if (!navState.ready || !navState.pathfinder) return;
+    if (!navState.ready) return;
+    updateDiagnostics({ queueDepth: requestQueue.length, pending: pendingRequests.size });
     for (let i = 0; i < MAX_QUEUE_BATCH; i++) {
       if (!requestQueue.length) break;
       processNextRequest();
-    }
-
-    if (navState.inflight.size > 0) {
-      for (let i = 0; i < SOLVER_CALLS_PER_FRAME; i++) {
-        if (navState.inflight.size === 0) break;
-        navState.pathfinder.calculate();
-      }
     }
   },
 
@@ -619,9 +810,19 @@ export const NavMeshManager = {
     navState.occupancy = null;
     navState.matrix = null;
     navState.obstacles.clear();
-    navState.pathfinder = null;
-    navState.inflight.clear();
     requestQueue.length = 0;
     pendingRequests.clear();
+    updateDiagnostics({
+      lastSearchMs: 0,
+      lastSearchExpanded: 0,
+      lastSearchResult: null,
+      lastFailureReason: null,
+      queueDepth: 0,
+      pending: 0
+    });
+  },
+
+  getDiagnostics() {
+    return { ...navState.diagnostics };
   }
 };
