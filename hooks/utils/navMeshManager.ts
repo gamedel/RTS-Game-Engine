@@ -1,5 +1,5 @@
 import type { Dispatch } from 'react';
-import PF from 'pathfinding';
+import EasyStar from 'easystarjs';
 import { Building, ResourceNode, Vector3, Action, UnitStatus } from '../../types';
 import { COLLISION_DATA } from '../../constants';
 
@@ -15,18 +15,20 @@ type NavigationGrid = {
   originZ: number;
 };
 
-type Finder = { findPath: (sx: number, sy: number, ex: number, ey: number, grid: any) => number[][] };
+type EasyStarInstance = InstanceType<typeof EasyStar.js>;
+type InflightRequest = PathRequest & { startCell: Cell; goalCell: Cell };
 
 type NavState = {
   dispatch: Dispatch<Action> | null;
   ready: boolean;
   grid: NavigationGrid | null;
-  baseGrid: any | null;
   walkable: Uint8Array | null;
   occupancy: Uint16Array | null;
+  matrix: number[][] | null;
   obstacles: Map<string, number[]>;
   agentPadding: number;
-  finder: Finder | null;
+  pathfinder: EasyStarInstance | null;
+  inflight: Map<string, InflightRequest>;
 };
 
 const WORLD_SIZE = 320;
@@ -35,18 +37,21 @@ const CELL_SIZE = 0.5;
 const SAMPLE_STEP = CELL_SIZE * 0.5;
 const MAX_QUEUE_BATCH = 24;
 const MAX_SEARCH_RADIUS_CELLS = 96;
+const SOLVER_CALLS_PER_FRAME = 6;
+const PATH_ITERATIONS_PER_CALC = 8000;
 const EPSILON = 1e-4;
 
 const navState: NavState = {
   dispatch: null,
   ready: false,
   grid: null,
-  baseGrid: null,
   walkable: null,
   occupancy: null,
+  matrix: null,
   obstacles: new Map(),
   agentPadding: 0,
-  finder: null
+  pathfinder: null,
+  inflight: new Map()
 };
 
 const requestQueue: PathRequest[] = [];
@@ -62,8 +67,16 @@ const clampToWorld = (p: Vector3): Vector3 => ({
 
 const encodeCell = (cell: Cell) => `${cell.cx}|${cell.cz}`;
 
-const isGridReady = (): navState is NavState & { grid: NavigationGrid; baseGrid: any; walkable: Uint8Array; occupancy: Uint16Array; finder: Finder } => {
-  return !!(navState.grid && navState.baseGrid && navState.walkable && navState.occupancy && navState.finder);
+type ReadyNavState = NavState & {
+  grid: NavigationGrid;
+  walkable: Uint8Array;
+  occupancy: Uint16Array;
+  matrix: number[][];
+  pathfinder: EasyStarInstance;
+};
+
+const isGridReady = (): navState is ReadyNavState => {
+  return !!(navState.grid && navState.walkable && navState.occupancy && navState.matrix && navState.pathfinder);
 };
 
 const worldToCell = (x: number, z: number): Cell | null => {
@@ -115,8 +128,8 @@ const adjustCellOccupancy = (index: number, delta: number) => {
   const blocked = next > 0;
   const cell = cellFromIndex(index);
   if (!cell) return;
-  navState.baseGrid.setWalkableAt(cell.cx, cell.cz, !blocked);
   navState.walkable[index] = blocked ? 0 : 1;
+  navState.matrix[cell.cz][cell.cx] = blocked ? 1 : 0;
 };
 
 const markCells = (id: string, indices: number[]) => {
@@ -222,7 +235,7 @@ const rebuildStaticObstacles = (buildings: Record<string, Building>, resources: 
   navState.walkable.fill(1);
   for (let cz = 0; cz < navState.grid.height; cz++) {
     for (let cx = 0; cx < navState.grid.width; cx++) {
-      navState.baseGrid.setWalkableAt(cx, cz, true);
+      navState.matrix[cz][cx] = 0;
     }
   }
 
@@ -325,49 +338,49 @@ const simplifyCells = (cells: Cell[]): Cell[] => {
   return result;
 };
 
-const computePath = (start: Vector3, goal: Vector3): Vector3[] => {
-  if (!isGridReady()) return [];
+const deliverPathResult = (unitId: string, nodes: { x: number; y: number }[] | null) => {
+  const inflight = navState.inflight.get(unitId);
+  navState.inflight.delete(unitId);
+  pendingRequests.delete(unitId);
 
-  const clampedStart = clampToWorld(start);
-  const clampedGoal = clampToWorld(goal);
+  if (!inflight) return;
+  if (!navState.dispatch || !isGridReady()) return;
 
-  const startCell = findNearestWalkableCell(worldToCell(clampedStart.x, clampedStart.z));
-  const goalCell = findNearestWalkableCell(worldToCell(clampedGoal.x, clampedGoal.z));
-
-  if (!startCell || !goalCell) return [];
-
-  const grid = navState.baseGrid.clone();
-  const rawPath = navState.finder.findPath(startCell.cx, startCell.cz, goalCell.cx, goalCell.cz, grid);
-
-  if (!rawPath.length) {
-    if (isCellWalkable(goalCell)) {
-      return [clampedGoal];
+  if (!nodes || nodes.length === 0) {
+    if (isWorldWalkable(inflight.goal)) {
+      navState.dispatch({ type: 'UPDATE_UNIT', payload: { id: unitId, path: [clampToWorld(inflight.goal)], pathIndex: 0 } });
+    } else {
+      handlePathFailure(unitId);
     }
-    return [];
+    return;
   }
 
-  const cells = rawPath.map(([cx, cz]) => ({ cx, cz }));
+  const cells = nodes.map(({ x, y }) => ({ cx: x, cz: y }));
   const simplified = simplifyCells(cells);
-  const waypoints: Vector3[] = simplified.map(cell => clampToWorld(cellToWorld(cell)));
+  const waypoints = simplified.map(cell => clampToWorld(cellToWorld(cell)));
 
   if (!waypoints.length) {
-    return [clampedGoal];
-  }
-
-  // Ensure the final waypoint is as close as possible to the requested goal.
-  const last = waypoints[waypoints.length - 1];
-  const dx = clampedGoal.x - last.x;
-  const dz = clampedGoal.z - last.z;
-  if (dx * dx + dz * dz > 1e-3) {
-    if (isWorldWalkable(clampedGoal)) {
-      waypoints.push(clampedGoal);
+    if (isWorldWalkable(inflight.goal)) {
+      navState.dispatch({ type: 'UPDATE_UNIT', payload: { id: unitId, path: [clampToWorld(inflight.goal)], pathIndex: 0 } });
+    } else {
+      handlePathFailure(unitId);
     }
+    return;
   }
 
-  return waypoints;
+  const last = waypoints[waypoints.length - 1];
+  const dx = inflight.goal.x - last.x;
+  const dz = inflight.goal.z - last.z;
+  if (dx * dx + dz * dz > 1e-3 && isWorldWalkable(inflight.goal)) {
+    waypoints.push(clampToWorld(inflight.goal));
+  }
+
+  navState.dispatch({ type: 'UPDATE_UNIT', payload: { id: unitId, path: waypoints, pathIndex: 0 } });
 };
 
 const handlePathFailure = (unitId: string) => {
+  pendingRequests.delete(unitId);
+  navState.inflight.delete(unitId);
   if (!navState.dispatch) return;
   navState.dispatch({
     type: 'UPDATE_UNIT',
@@ -382,29 +395,59 @@ const handlePathFailure = (unitId: string) => {
 };
 
 const processNextRequest = () => {
+  if (!isGridReady()) return;
   const req = requestQueue.shift();
   if (!req) return;
 
-  const { unitId, start, goal } = req;
-  try {
-    const path = computePath(start, goal);
-    if (!navState.dispatch) return;
+  const unitId = req.unitId;
+  const clampedStart = clampToWorld(req.start);
+  const clampedGoal = clampToWorld(req.goal);
 
-    if (!path.length) {
-      if (isWorldWalkable(goal)) {
-        navState.dispatch({ type: 'UPDATE_UNIT', payload: { id: unitId, path: [clampToWorld(goal)], pathIndex: 0 } });
-      } else {
-        handlePathFailure(unitId);
-      }
-      return;
-    }
+  const startCell = findNearestWalkableCell(worldToCell(clampedStart.x, clampedStart.z));
+  const goalCell = findNearestWalkableCell(worldToCell(clampedGoal.x, clampedGoal.z));
 
-    navState.dispatch({ type: 'UPDATE_UNIT', payload: { id: unitId, path, pathIndex: 0 } });
-  } catch (err) {
-    console.error('[NavMeshManager] Failed to compute path', err);
-    handlePathFailure(unitId);
-  } finally {
+  if (!startCell || !goalCell) {
     pendingRequests.delete(unitId);
+    handlePathFailure(unitId);
+    return;
+  }
+
+  if (startCell.cx === goalCell.cx && startCell.cz === goalCell.cz) {
+    pendingRequests.delete(unitId);
+    if (isWorldWalkable(clampedGoal)) {
+      if (navState.dispatch) {
+        navState.dispatch({ type: 'UPDATE_UNIT', payload: { id: unitId, path: [clampedGoal], pathIndex: 0 } });
+      }
+    } else {
+      handlePathFailure(unitId);
+    }
+    return;
+  }
+
+  const inflight: InflightRequest = {
+    unitId,
+    start: clampedStart,
+    goal: clampedGoal,
+    startCell,
+    goalCell
+  };
+
+  navState.inflight.set(unitId, inflight);
+  try {
+    navState.pathfinder.findPath(
+      startCell.cx,
+      startCell.cz,
+      goalCell.cx,
+      goalCell.cz,
+      path => {
+        deliverPathResult(unitId, path as { x: number; y: number }[] | null);
+      }
+    );
+  } catch (err) {
+    console.error('[NavMeshManager] Failed to schedule path', err);
+    navState.inflight.delete(unitId);
+    pendingRequests.delete(unitId);
+    handlePathFailure(unitId);
   }
 };
 
@@ -464,11 +507,12 @@ export const NavMeshManager = {
     navState.dispatch = dispatch;
     navState.ready = false;
     navState.grid = null;
-    navState.baseGrid = null;
     navState.walkable = null;
     navState.occupancy = null;
+    navState.matrix = null;
     navState.obstacles.clear();
-    navState.finder = null;
+    navState.pathfinder = null;
+    navState.inflight.clear();
     requestQueue.length = 0;
     pendingRequests.clear();
   },
@@ -491,21 +535,26 @@ export const NavMeshManager = {
       originZ
     };
 
-    navState.baseGrid = new PF.Grid(width, height);
     navState.walkable = new Uint8Array(width * height);
     navState.walkable.fill(1);
     navState.occupancy = new Uint16Array(width * height);
     navState.occupancy.fill(0);
+    navState.matrix = Array.from({ length: height }, () => new Array(width).fill(0));
     navState.obstacles.clear();
 
     const unitRadii = Object.values(COLLISION_DATA.UNITS).map(u => u.radius);
     const maxUnitRadius = unitRadii.length ? Math.max(...unitRadii) : 0.5;
     navState.agentPadding = maxUnitRadius + 0.25;
 
-    navState.finder = new PF.JumpPointFinder({
-      diagonalMovement: PF.DiagonalMovement.IfAtMostOneObstacle,
-      heuristic: PF.Heuristic.euclidean
-    }) as Finder;
+    navState.pathfinder = new EasyStar.js();
+    navState.pathfinder.setGrid(navState.matrix);
+    navState.pathfinder.setAcceptableTiles([0]);
+    navState.pathfinder.enableDiagonals();
+    navState.pathfinder.setIterationsPerCalculation(PATH_ITERATIONS_PER_CALC);
+    // @ts-expect-error - type definitions are outdated and miss these helpers
+    if (typeof navState.pathfinder.disableCornerCutting === 'function') {
+      navState.pathfinder.disableCornerCutting();
+    }
 
     rebuildStaticObstacles(buildings, resources);
     navState.ready = true;
@@ -548,10 +597,17 @@ export const NavMeshManager = {
   },
 
   processQueue() {
-    if (!navState.ready) return;
+    if (!navState.ready || !navState.pathfinder) return;
     for (let i = 0; i < MAX_QUEUE_BATCH; i++) {
       if (!requestQueue.length) break;
       processNextRequest();
+    }
+
+    if (navState.inflight.size > 0) {
+      for (let i = 0; i < SOLVER_CALLS_PER_FRAME; i++) {
+        if (navState.inflight.size === 0) break;
+        navState.pathfinder.calculate();
+      }
     }
   },
 
@@ -559,11 +615,12 @@ export const NavMeshManager = {
     navState.dispatch = null;
     navState.ready = false;
     navState.grid = null;
-    navState.baseGrid = null;
     navState.walkable = null;
     navState.occupancy = null;
+    navState.matrix = null;
     navState.obstacles.clear();
-    navState.finder = null;
+    navState.pathfinder = null;
+    navState.inflight.clear();
     requestQueue.length = 0;
     pendingRequests.clear();
   }
