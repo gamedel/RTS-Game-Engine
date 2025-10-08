@@ -29,8 +29,8 @@ const StatusIcon: React.FC<{ status: UnitStatus }> = ({ status }) => {
     );
 };
 
-export const MultiSelectPanel: React.FC<{ units: Unit[], dispatch: React.Dispatch<Action> }> = ({ units, dispatch }) => {
-    
+export const MultiSelectPanel: React.FC<{ units: Unit[], dispatch: React.Dispatch<Action>, isTouchFriendly?: boolean }> = ({ units, dispatch, isTouchFriendly = false }) => {
+
     const sortedUnits = [...units].sort((a, b) => {
         const order = { [UnitType.WORKER]: 0, [UnitType.INFANTRY]: 1, [UnitType.ARCHER]: 2, [UnitType.CAVALRY]: 3, [UnitType.CATAPULT]: 4 };
         return order[a.unitType] - order[b.unitType];
@@ -40,15 +40,15 @@ export const MultiSelectPanel: React.FC<{ units: Unit[], dispatch: React.Dispatc
 
     return (
         <div className="flex h-full w-full overflow-hidden">
-            <div className="flex items-center gap-1.5 h-full w-full overflow-x-auto overflow-y-hidden p-2 custom-scrollbar">
+            <div className={`flex items-center ${isTouchFriendly ? 'gap-2.5 p-3' : 'gap-1.5 p-2'} h-full w-full overflow-x-auto overflow-y-hidden custom-scrollbar`}>
                 {sortedUnits.slice(0, VISIBLE_LIMIT).map(unit => {
                     const hpPercentage = (unit.hp / unit.maxHp) * 100;
                     const healthColor = hpPercentage > 60 ? 'bg-green-500' : hpPercentage > 30 ? 'bg-yellow-500' : 'bg-red-500';
-                    
+
                     return (
                         <button
                             key={unit.id}
-                            className="relative bg-gradient-to-b from-slate-700/60 to-slate-900/60 backdrop-blur-sm rounded-lg p-1 flex-shrink-0 flex flex-col items-center justify-between ring-1 ring-slate-600/80 hover:ring-cyan-400 transition-all duration-150 transform hover:-translate-y-1 focus:outline-none focus:ring-2 focus:ring-cyan-300 w-16 h-full"
+                            className={`relative bg-gradient-to-b from-slate-700/60 to-slate-900/60 backdrop-blur-sm rounded-lg p-1 flex-shrink-0 flex flex-col items-center justify-between ring-1 ring-slate-600/80 hover:ring-cyan-400 transition-all duration-150 transform hover:-translate-y-1 focus:outline-none focus:ring-2 focus:ring-cyan-300 ${isTouchFriendly ? 'w-20 h-full' : 'w-16 h-full'}`}
                             onClick={(e) => {
                                 e.stopPropagation();
                                 dispatch({ type: 'SELECT_OBJECT', payload: { id: unit.id, isShift: false } });
@@ -57,14 +57,14 @@ export const MultiSelectPanel: React.FC<{ units: Unit[], dispatch: React.Dispatc
                         >
                             <StatusIcon status={unit.status} />
                             <div className="flex-grow flex items-center justify-center w-full text-slate-300">
-                                <UnitTypeIcon type={unit.unitType} style={{ width: '36px', height: '36px' }} />
+                                <UnitTypeIcon type={unit.unitType} style={{ width: isTouchFriendly ? '42px' : '36px', height: isTouchFriendly ? '42px' : '36px' }} />
                             </div>
 
                             <div className="w-full relative h-4 text-center">
                                 <div className="w-full bg-slate-900/50 rounded-full h-2 absolute bottom-2 left-0">
                                     <div className={`${healthColor} h-full rounded-full transition-all duration-300 ease-in-out`} style={{ width: `${hpPercentage}%` }}></div>
                                 </div>
-                                <p className="absolute bottom-0 left-0 right-0 text-xs font-bold text-white" style={{ textShadow: '0 0 3px black' }}>
+                                <p className={`absolute bottom-0 left-0 right-0 ${isTouchFriendly ? 'text-sm' : 'text-xs'} font-bold text-white`} style={{ textShadow: '0 0 3px black' }}>
                                     {Math.floor(unit.hp)}
                                 </p>
                             </div>
@@ -72,7 +72,7 @@ export const MultiSelectPanel: React.FC<{ units: Unit[], dispatch: React.Dispatc
                     )
                 })}
                  {extra > 0 && (
-                    <div className="relative bg-gradient-to-b from-slate-700/60 to-slate-900/60 backdrop-blur-sm rounded-lg p-1 flex-shrink-0 flex flex-col items-center justify-center ring-1 ring-slate-600/80 w-16 h-full text-slate-300 font-bold text-lg">
+                    <div className={`relative bg-gradient-to-b from-slate-700/60 to-slate-900/60 backdrop-blur-sm rounded-lg p-1 flex-shrink-0 flex flex-col items-center justify-center ring-1 ring-slate-600/80 text-slate-300 font-bold ${isTouchFriendly ? 'w-20 h-full text-xl' : 'w-16 h-full text-lg'}`}>
                         +{extra}
                     </div>
                 )}

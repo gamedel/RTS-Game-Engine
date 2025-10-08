@@ -347,54 +347,32 @@ export const NavMeshManager = {
     };
 
     const linearStep = capToStep(from, to, stepSize);
+
     if (!navMeshQuery) {
       return linearStep;
     }
 
-    const he = {
-      x: rcConfig.walkableRadius + 0.1,
-      y: rcConfig.walkableHeight,
-      z: rcConfig.walkableRadius + 0.1,
-    };
+    const projected = this.projectMove(from, linearStep);
+    const projectedDx = projected.x - from.x;
+    const projectedDz = projected.z - from.z;
+    const projectedMoveSq = projectedDx * projectedDx + projectedDz * projectedDz;
 
-    let start = from;
-    try {
-      const sRes: any = navMeshQuery.findClosestPoint(from, { halfExtents: he });
-      if (sRes?.point) {
-        start = { x: sRes.point.x, y: 0, z: sRes.point.z };
-      }
-    } catch {
-      // Ignore clamp errors and fall back to the original start point
+    const isFiniteVector = (v: Vector3) => Number.isFinite(v.x) && Number.isFinite(v.z);
+
+    if (isFiniteVector(projected) && projectedMoveSq > 1e-6) {
+      return { x: projected.x, y: 0, z: projected.z };
     }
 
-    const projected = capToStep(start, to, stepSize);
-    const snapped = this.safeSnap(projected, Math.max(stepSize * 2, 0.5));
+    const safeLinear = this.safeSnap(linearStep, Math.max(stepSize * 2, 0.5));
+    const safeDx = safeLinear.x - from.x;
+    const safeDz = safeLinear.z - from.z;
+    const safeMoveSq = safeDx * safeDx + safeDz * safeDz;
 
-    const dx = snapped.x - start.x;
-    const dz = snapped.z - start.z;
-    const movedSq = dx * dx + dz * dz;
-    const looksZero = (v: Vector3) => Math.abs(v.x) < 1e-6 && Math.abs(v.z) < 1e-6;
-
-    if (movedSq < 1e-6) {
-      const alt = this.safeSnap(linearStep, Math.max(stepSize * 2, 0.5));
-      const altDx = alt.x - from.x;
-      const altDz = alt.z - from.z;
-      if (altDx * altDx + altDz * altDz >= 1e-6) {
-        return alt;
-      }
-      return linearStep;
+    if (isFiniteVector(safeLinear) && safeMoveSq > 1e-6) {
+      return { x: safeLinear.x, y: 0, z: safeLinear.z };
     }
 
-    const farTarget2 = to.x * to.x + to.z * to.z;
-    if (looksZero(snapped) && farTarget2 > 25 * 25) {
-      const alt = this.safeSnap(linearStep, Math.max(stepSize * 2, 0.5));
-      if (!looksZero(alt)) {
-        return alt;
-      }
-      return linearStep;
-    }
-
-    return snapped;
+    return linearStep;
   },
 
   processQueue: () => {

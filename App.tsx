@@ -220,7 +220,17 @@ function AppContent() {
       {gamePhase === 'playing' && <LoadingOverlay loadingMessage={loadingMessage} />}
       {gamePhase === 'playing' && !loadingMessage && <GameStatusOverlay status={gameState.gameStatus} onBackToMenu={handleBackToMenu} />}
       {gamePhase === 'playing' && !loadingMessage && gameState.gameStatus === 'paused' && <PauseMenu dispatch={dispatch} onBackToMenu={handleBackToMenu} />}
-      {gamePhase === 'playing' && !loadingMessage && <UI gameState={gameState} selectedObjects={selectedObjects} dispatch={dispatch} fps={fps} camera={camera} cameraControlsRef={cameraControlsRef} />}
+      {gamePhase === 'playing' && !loadingMessage && (
+        <UI
+          gameState={gameState}
+          selectedObjects={selectedObjects}
+          dispatch={dispatch}
+          fps={fps}
+          camera={camera}
+          cameraControlsRef={cameraControlsRef}
+          isTouchDevice={isTouchDevice}
+        />
+      )}
       <div className="flex-grow relative">
         {gamePhase === 'playing' && isSelecting && <div style={selectionBoxStyle} />}
         <CanvasErrorBoundary onError={handleCanvasError} resetKey={gamePhase}>

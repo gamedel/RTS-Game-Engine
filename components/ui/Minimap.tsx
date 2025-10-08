@@ -3,18 +3,19 @@ import * as THREE from 'three';
 import { GameState, Vector3, GameObjectType, ResourceType } from '../../types';
 import { CameraControlsRef } from '../../../App';
 
-const MAP_SIZE = 200;
+const DEFAULT_MAP_SIZE = 200;
+const TOUCH_MAP_SIZE = 240;
 const WORLD_SIZE = 300; // From Ground plane args
 
-const worldToMap = (pos: Vector3) => {
-    const mapX = (pos.x / WORLD_SIZE + 0.5) * MAP_SIZE;
-    const mapY = (pos.z / WORLD_SIZE + 0.5) * MAP_SIZE;
+const worldToMap = (pos: Vector3, mapSize: number) => {
+    const mapX = (pos.x / WORLD_SIZE + 0.5) * mapSize;
+    const mapY = (pos.z / WORLD_SIZE + 0.5) * mapSize;
     return { x: mapX, y: mapY };
 };
 
-const mapToWorld = (mapPos: { x: number, y: number }) => {
-    const worldX = (mapPos.x / MAP_SIZE - 0.5) * WORLD_SIZE;
-    const worldZ = (mapPos.y / MAP_SIZE - 0.5) * WORLD_SIZE;
+const mapToWorld = (mapPos: { x: number, y: number }, mapSize: number) => {
+    const worldX = (mapPos.x / mapSize - 0.5) * WORLD_SIZE;
+    const worldZ = (mapPos.y / mapSize - 0.5) * WORLD_SIZE;
     return { x: worldX, y: 0, z: worldZ };
 };
 
@@ -22,11 +23,15 @@ interface MinimapProps {
     gameState: GameState;
     camera: THREE.Camera | null;
     cameraControlsRef: React.RefObject<CameraControlsRef>;
+    isTouchDevice: boolean;
 }
 
-export const Minimap: React.FC<MinimapProps> = ({ gameState, camera, cameraControlsRef }) => {
+export const Minimap: React.FC<MinimapProps> = ({ gameState, camera, cameraControlsRef, isTouchDevice }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const [isDragging, setIsDragging] = useState(false);
+    const activePointerId = useRef<number | null>(null);
+
+    const mapSize = isTouchDevice ? TOUCH_MAP_SIZE : DEFAULT_MAP_SIZE;
 
     const draw = useCallback(() => {
         const canvas = canvasRef.current;
@@ -36,18 +41,18 @@ export const Minimap: React.FC<MinimapProps> = ({ gameState, camera, cameraContr
 
         // Clear canvas
         ctx.fillStyle = '#4A6A44'; // Ground color from Ground.tsx
-        ctx.fillRect(0, 0, MAP_SIZE, MAP_SIZE);
+        ctx.fillRect(0, 0, mapSize, mapSize);
 
         // Draw resources
         Object.values(gameState.resourcesNodes).forEach(node => {
-            const { x, y } = worldToMap(node.position);
+            const { x, y } = worldToMap(node.position, mapSize);
             ctx.fillStyle = node.resourceType === ResourceType.TREE ? '#22c55e' : '#facc15';
             ctx.fillRect(x - 1, y - 1, 3, 3);
         });
 
         // Draw buildings
         Object.values(gameState.buildings).forEach(building => {
-            const { x, y } = worldToMap(building.position);
+            const { x, y } = worldToMap(building.position, mapSize);
             const owner = gameState.players[building.playerId];
             ctx.fillStyle = owner ? owner.color : '#ffffff';
             ctx.fillRect(x - 2, y - 2, 4, 4);
@@ -56,7 +61,7 @@ export const Minimap: React.FC<MinimapProps> = ({ gameState, camera, cameraContr
         // Draw units
         Object.values(gameState.units).forEach(unit => {
             if (unit.isDying) return;
-            const { x, y } = worldToMap(unit.position);
+            const { x, y } = worldToMap(unit.position, mapSize);
             const owner = gameState.players[unit.playerId];
             ctx.fillStyle = owner ? owner.color : '#ffffff';
             ctx.fillRect(x - 1, y - 1, 2, 2);
@@ -87,7 +92,7 @@ export const Minimap: React.FC<MinimapProps> = ({ gameState, camera, cameraContr
             });
 
             if (worldCorners.length === 4) {
-                const mapCorners = worldCorners.map(worldToMap);
+                const mapCorners = worldCorners.map(corner => worldToMap(corner, mapSize));
                 ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
                 ctx.lineWidth = 1.5;
                 ctx.beginPath();
@@ -100,55 +105,59 @@ export const Minimap: React.FC<MinimapProps> = ({ gameState, camera, cameraContr
             }
         }
 
-    }, [gameState, camera]);
+    }, [gameState, camera, mapSize]);
 
     useEffect(() => {
         const animationFrameId = requestAnimationFrame(draw);
         return () => cancelAnimationFrame(animationFrameId);
     }, [draw]);
 
-    const handleMapInteraction = (e: React.MouseEvent<HTMLCanvasElement>) => {
-        const canvas = canvasRef.current;
-        if (!canvas || !cameraControlsRef.current) return;
-
-        const rect = canvas.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const y = e.clientY - rect.top;
-
-        const worldPos = mapToWorld({ x, y });
+    const interactWithMap = (clientX: number, clientY: number, target: HTMLCanvasElement) => {
+        if (!cameraControlsRef.current) return;
+        const rect = target.getBoundingClientRect();
+        const x = clientX - rect.left;
+        const y = clientY - rect.top;
+        const worldPos = mapToWorld({ x, y }, mapSize);
         cameraControlsRef.current.setTarget(worldPos);
     };
 
-    const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        e.preventDefault();
+        activePointerId.current = e.pointerId;
+        canvas.setPointerCapture(e.pointerId);
         setIsDragging(true);
-        handleMapInteraction(e);
+        interactWithMap(e.clientX, e.clientY, canvas);
     };
 
-    const handleMouseUp = () => {
-        setIsDragging(false);
+    const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+        const canvas = canvasRef.current;
+        if (!canvas || !isDragging || activePointerId.current !== e.pointerId) return;
+        e.preventDefault();
+        interactWithMap(e.clientX, e.clientY, canvas);
     };
-    
-    const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-        if (isDragging) {
-            handleMapInteraction(e);
+
+    const endInteraction = (e: React.PointerEvent<HTMLCanvasElement>) => {
+        const canvas = canvasRef.current;
+        if (canvas && activePointerId.current === e.pointerId) {
+            canvas.releasePointerCapture(e.pointerId);
         }
-    };
-    
-    const handleMouseLeave = () => {
+        activePointerId.current = null;
         setIsDragging(false);
     };
-
 
     return (
         <canvas
             ref={canvasRef}
-            width={MAP_SIZE}
-            height={MAP_SIZE}
-            className="absolute top-12 left-4 bg-gray-800 border-2 border-slate-600 rounded-sm shadow-lg z-20"
-            onMouseDown={handleMouseDown}
-            onMouseUp={handleMouseUp}
-            onMouseMove={handleMouseMove}
-            onMouseLeave={handleMouseLeave}
+            width={mapSize}
+            height={mapSize}
+            className={`absolute top-12 left-4 bg-gray-800 border-2 border-slate-600 rounded-sm shadow-lg z-20 ${isTouchDevice ? 'touch-none' : ''}`}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={endInteraction}
+            onPointerCancel={endInteraction}
+            onPointerLeave={endInteraction}
         />
     );
 };

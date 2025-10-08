@@ -13,10 +13,11 @@ export const UI: React.FC<{
     fps: number;
     camera: THREE.Camera | null;
     cameraControlsRef: React.RefObject<CameraControlsRef>;
-}> = ({ gameState, selectedObjects, dispatch, fps, camera, cameraControlsRef }) => (
+    isTouchDevice: boolean;
+}> = ({ gameState, selectedObjects, dispatch, fps, camera, cameraControlsRef, isTouchDevice }) => (
     <>
-        <ResourceBar gameState={gameState} dispatch={dispatch} fps={fps} />
-        <Minimap gameState={gameState} camera={camera} cameraControlsRef={cameraControlsRef} />
-        <ControlPanel gameState={gameState} selectedObjects={selectedObjects} dispatch={dispatch} />
+        <ResourceBar gameState={gameState} dispatch={dispatch} fps={fps} isTouchDevice={isTouchDevice} />
+        <Minimap gameState={gameState} camera={camera} cameraControlsRef={cameraControlsRef} isTouchDevice={isTouchDevice} />
+        <ControlPanel gameState={gameState} selectedObjects={selectedObjects} dispatch={dispatch} isTouchDevice={isTouchDevice} />
     </>
 );
