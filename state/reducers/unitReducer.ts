@@ -2,6 +2,52 @@ import * as THREE from 'three';
 import { v4 as uuidv4 } from 'uuid';
 import { GameState, Action, Unit, GameObjectType, UnitType, UnitStatus, Building, ResourceNode, FloatingText, UnitStance, BuildingType, ResourceType, Vector3, ResearchCategory } from '../../types';
 import { UNIT_CONFIG, COLLISION_DATA, RESEARCH_CONFIG } from '../../constants';
+import { NavMeshManager } from '../../hooks/utils/navMeshManager';
+
+const computeBuildingApproachPoint = (unit: Unit, building: Building, desired: Vector3): Vector3 => {
+    const buildingCollision = COLLISION_DATA.BUILDINGS[building.buildingType];
+    const unitCollision = COLLISION_DATA.UNITS[unit.unitType];
+
+    if (!buildingCollision || !unitCollision) {
+        return NavMeshManager.safeSnap(desired, 4);
+    }
+
+    const center = building.position;
+    let dirX = desired.x - center.x;
+    let dirZ = desired.z - center.z;
+    let dirLength = Math.hypot(dirX, dirZ);
+
+    if (dirLength < 1e-3) {
+        dirX = unit.position.x - center.x;
+        dirZ = unit.position.z - center.z;
+        dirLength = Math.hypot(dirX, dirZ);
+        if (dirLength < 1e-3) {
+            dirX = 1;
+            dirZ = 0;
+            dirLength = 1;
+        }
+    }
+
+    dirX /= dirLength;
+    dirZ /= dirLength;
+
+    const halfWidth = buildingCollision.width / 2;
+    const halfDepth = buildingCollision.depth / 2;
+
+    const distanceToEdge = Math.min(
+        dirX === 0 ? Number.POSITIVE_INFINITY : halfWidth / Math.abs(dirX),
+        dirZ === 0 ? Number.POSITIVE_INFINITY : halfDepth / Math.abs(dirZ)
+    );
+
+    const clearance = unitCollision.radius + 0.5;
+    const approach = {
+        x: center.x + dirX * (distanceToEdge + clearance),
+        y: 0,
+        z: center.z + dirZ * (distanceToEdge + clearance),
+    };
+
+    return NavMeshManager.safeSnap(approach, clearance + 2);
+};
 
 export function unitReducer(state: GameState, action: Action): GameState {
     switch (action.type) {
@@ -25,7 +71,7 @@ export function unitReducer(state: GameState, action: Action): GameState {
             };
             
             if (unit.status === UnitStatus.FLEEING && targetObject?.type === GameObjectType.BUILDING) {
-                 return { ...state, units: { ...state.units, [unitId]: { ...unit, targetPosition: targetPosition, targetId: targetId, path: undefined, pathIndex: undefined, pathTarget: undefined } }};
+                return { ...state, units: { ...state.units, [unitId]: { ...unit, targetPosition: targetPosition, targetId: targetId, path: undefined, pathIndex: undefined, pathTarget: undefined } }};
             }
 
             const isWorkerRepairing =
@@ -53,11 +99,49 @@ export function unitReducer(state: GameState, action: Action): GameState {
 
 
             if (isWorkerRepairing) {
-                 return { ...state, units: { ...state.units, [unitId]: { ...unit, ...taskAssignment, status: UnitStatus.MOVING, pathTarget: targetPosition, targetId: targetId, repairTask: { buildingId: targetId! }, buildTask: undefined, resourcePayload: undefined, finalDestination: newFinalDestination, path: undefined, pathIndex: undefined, targetPosition: undefined } } };
+                const approachPosition = computeBuildingApproachPoint(unit, targetObject as Building, targetPosition);
+                return {
+                    ...state,
+                    units: {
+                        ...state.units,
+                        [unitId]: {
+                            ...unit,
+                            ...taskAssignment,
+                            status: UnitStatus.MOVING,
+                            pathTarget: approachPosition,
+                            targetId: targetId,
+                            repairTask: { buildingId: targetId! },
+                            buildTask: undefined,
+                            resourcePayload: undefined,
+                            finalDestination: newFinalDestination,
+                            path: undefined,
+                            pathIndex: undefined,
+                            targetPosition: undefined,
+                        },
+                    },
+                };
             }
             if (isWorkerConstructing) {
                 const building = targetObject as Building;
-                return { ...state, units: { ...state.units, [unitId]: { ...unit, ...taskAssignment, status: UnitStatus.MOVING, pathTarget: building.position, targetId: building.id, buildTask: { buildingId: building.id, position: building.position }, finalDestination: newFinalDestination, path: undefined, pathIndex: undefined, targetPosition: undefined } } };
+                const approachPosition = computeBuildingApproachPoint(unit, building, targetPosition ?? building.position);
+                return {
+                    ...state,
+                    units: {
+                        ...state.units,
+                        [unitId]: {
+                            ...unit,
+                            ...taskAssignment,
+                            status: UnitStatus.MOVING,
+                            pathTarget: approachPosition,
+                            targetId: building.id,
+                            buildTask: { buildingId: building.id, position: building.position },
+                            finalDestination: newFinalDestination,
+                            path: undefined,
+                            pathIndex: undefined,
+                            targetPosition: undefined,
+                        },
+                    },
+                };
             }
 
             let finalTargetPosition = targetPosition;
@@ -88,6 +172,14 @@ export function unitReducer(state: GameState, action: Action): GameState {
                     }
                 }
                 finalTargetPosition = bestSlot ? { x: bestSlot.x, y: 0, z: bestSlot.z } : finalTargetPosition;
+            }
+
+            if (targetObject?.type === GameObjectType.BUILDING) {
+                finalTargetPosition = computeBuildingApproachPoint(
+                    unit,
+                    targetObject as Building,
+                    finalTargetPosition ?? targetObject.position
+                );
             }
 
             const updatedUnit: Unit = {
