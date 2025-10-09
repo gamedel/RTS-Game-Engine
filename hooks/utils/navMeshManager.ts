@@ -2,7 +2,22 @@ import type { Dispatch } from 'react';
 import { Building, ResourceNode, Vector3, Action, UnitStatus } from '../../types';
 import { COLLISION_DATA } from '../../constants';
 
-type PathRequest = { unitId: string; start: Vector3; goal: Vector3 };
+type PathRequest = {
+  unitId: string;
+  start: Vector3;
+  goal: Vector3;
+  startCell: Cell | null;
+  goalCell: Cell | null;
+  key: string | null;
+};
+
+type PathFollower = {
+  unitId: string;
+  start: Vector3;
+  goal: Vector3;
+  startCell: Cell | null;
+  goalCell: Cell | null;
+};
 
 type Cell = { cx: number; cz: number };
 
@@ -67,7 +82,9 @@ const navState: NavState = {
 };
 
 const requestQueue: PathRequest[] = [];
-const pendingRequests = new Set<string>();
+const pendingRequests = new Map<string, string | null>();
+const queuedRequestsByKey = new Map<string, PathRequest>();
+const followersByKey = new Map<string, PathFollower[]>();
 
 const PATH_CACHE_CLUSTER = 3;
 const PATH_CACHE_TTL = 2000;
@@ -666,15 +683,41 @@ const updateDiagnostics = (updates: Partial<NavState['diagnostics']>) => {
   navState.diagnostics = { ...navState.diagnostics, ...updates };
 };
 
-const handlePathFailure = (unitId: string, reason: string) => {
+const completeDirectSuccess = (unitId: string, goal: Vector3, suppressDiagnostics = false) => {
+  const clampedGoal = clampToWorld(goal);
   pendingRequests.delete(unitId);
-  updateDiagnostics({
-    lastSearchResult: 'failed',
-    lastFailureReason: reason,
-    pending: pendingRequests.size,
-    queueDepth: requestQueue.length
+  if (!navState.dispatch) return;
+  if (!suppressDiagnostics) {
+    updateDiagnostics({
+      lastSearchMs: 0,
+      lastSearchExpanded: 0,
+      lastSearchResult: 'success',
+      lastFailureReason: null,
+      pending: pendingRequests.size,
+      queueDepth: requestQueue.length
+    });
+  } else {
+    updateDiagnostics({ pending: pendingRequests.size, queueDepth: requestQueue.length });
+  }
+  navState.dispatch({
+    type: 'UPDATE_UNIT',
+    payload: { id: unitId, path: [clampedGoal], pathIndex: 0, pathTarget: clampedGoal }
   });
-  if (typeof process !== 'undefined' && process.env && process.env.NODE_ENV !== 'production') {
+};
+
+const handlePathFailure = (unitId: string, reason: string, suppressDiagnostics = false) => {
+  pendingRequests.delete(unitId);
+  if (!suppressDiagnostics) {
+    updateDiagnostics({
+      lastSearchResult: 'failed',
+      lastFailureReason: reason,
+      pending: pendingRequests.size,
+      queueDepth: requestQueue.length
+    });
+  } else {
+    updateDiagnostics({ pending: pendingRequests.size, queueDepth: requestQueue.length });
+  }
+  if (!suppressDiagnostics && typeof process !== 'undefined' && process.env && process.env.NODE_ENV !== 'production') {
     console.warn(`[NavMesh] Path request for ${unitId} failed: ${reason}`);
   }
   if (!navState.dispatch) return;
@@ -694,23 +737,29 @@ const applySolution = (
   unitId: string,
   goal: Vector3,
   startCell: Cell,
-  solution: PathSolution
+  solution: PathSolution,
+  suppressDiagnostics = false
 ) => {
   pendingRequests.delete(unitId);
-  updateDiagnostics({
-    lastSearchMs: solution.elapsedMs,
-    lastSearchExpanded: solution.expanded,
-    lastSearchResult: solution.reachedGoal ? 'success' : solution.cells.length > 0 ? 'partial' : 'failed',
-    lastFailureReason: solution.failureReason ?? null,
-    pending: pendingRequests.size,
-    queueDepth: requestQueue.length
-  });
+
+  if (!solution.cells.length) {
+    handlePathFailure(unitId, solution.failureReason ?? 'no-path', suppressDiagnostics);
+    return;
+  }
 
   if (!navState.dispatch || !isGridReady()) return;
 
-  if (!solution.cells.length) {
-    handlePathFailure(unitId, solution.failureReason ?? 'no-path');
-    return;
+  if (!suppressDiagnostics) {
+    updateDiagnostics({
+      lastSearchMs: solution.elapsedMs,
+      lastSearchExpanded: solution.expanded,
+      lastSearchResult: solution.reachedGoal ? 'success' : solution.cells.length > 0 ? 'partial' : 'failed',
+      lastFailureReason: solution.failureReason ?? null,
+      pending: pendingRequests.size,
+      queueDepth: requestQueue.length
+    });
+  } else {
+    updateDiagnostics({ pending: pendingRequests.size, queueDepth: requestQueue.length });
   }
 
   const simplified = simplifyCells(solution.cells);
@@ -722,7 +771,7 @@ const applySolution = (
   }
 
   if (!waypoints.length) {
-    handlePathFailure(unitId, 'empty-waypoints');
+    handlePathFailure(unitId, 'empty-waypoints', suppressDiagnostics);
     return;
   }
 
@@ -742,39 +791,76 @@ const applySolution = (
   navState.dispatch({ type: 'UPDATE_UNIT', payload: { id: unitId, path: waypoints, pathIndex: 0, pathTarget: clampToWorld(goal) } });
 };
 
+const deliverFollowers = (followers: PathFollower[], referenceGoalCell: Cell) => {
+  if (!followers.length) return;
+
+  for (const follower of followers) {
+    const followerGoal = clampToWorld(follower.goal);
+    const followerStart = clampToWorld(follower.start);
+    const startCell = follower.startCell ?? findNearestWalkableCell(worldToCell(followerStart.x, followerStart.z));
+    const goalCell = follower.goalCell ?? referenceGoalCell;
+
+    if (!startCell || !goalCell) {
+      handlePathFailure(follower.unitId, 'missing-start-or-goal', true);
+      continue;
+    }
+
+    const cached = reuseCachedPath(startCell, goalCell);
+    if (cached) {
+      applySolution(follower.unitId, followerGoal, startCell, cached, true);
+      continue;
+    }
+
+    const solution = solvePath(startCell, goalCell);
+    storePathInCache(startCell, goalCell, solution);
+    applySolution(follower.unitId, followerGoal, startCell, solution, true);
+  }
+};
+
 const processNextRequest = () => {
   if (!isGridReady()) return;
   const req = requestQueue.shift();
   if (!req) return;
 
   const unitId = req.unitId;
+  if (req.key) {
+    queuedRequestsByKey.delete(req.key);
+  }
+  const followers = req.key ? followersByKey.get(req.key) ?? [] : [];
+  if (req.key) {
+    followersByKey.delete(req.key);
+  }
+
   const clampedStart = clampToWorld(req.start);
   const clampedGoal = clampToWorld(req.goal);
 
-  const startCell = findNearestWalkableCell(worldToCell(clampedStart.x, clampedStart.z));
-  const goalCell = findNearestWalkableCell(worldToCell(clampedGoal.x, clampedGoal.z));
+  const startCell = req.startCell ?? findNearestWalkableCell(worldToCell(clampedStart.x, clampedStart.z));
+  const goalCell = req.goalCell ?? findNearestWalkableCell(worldToCell(clampedGoal.x, clampedGoal.z));
 
   if (!startCell || !goalCell) {
     handlePathFailure(unitId, 'missing-start-or-goal');
+    for (const follower of followers) {
+      handlePathFailure(follower.unitId, 'missing-start-or-goal', true);
+    }
     return;
   }
 
   if (startCell.cx === goalCell.cx && startCell.cz === goalCell.cz) {
     if (isWorldWalkable(clampedGoal)) {
-      if (navState.dispatch) {
-        pendingRequests.delete(unitId);
-        updateDiagnostics({
-          lastSearchMs: 0,
-          lastSearchExpanded: 0,
-          lastSearchResult: 'success',
-          lastFailureReason: null,
-          pending: pendingRequests.size,
-          queueDepth: requestQueue.length
-        });
-        navState.dispatch({ type: 'UPDATE_UNIT', payload: { id: unitId, path: [clampedGoal], pathIndex: 0, pathTarget: clampedGoal } });
+      completeDirectSuccess(unitId, clampedGoal);
+      for (const follower of followers) {
+        const followerGoal = clampToWorld(follower.goal);
+        if (isWorldWalkable(followerGoal)) {
+          completeDirectSuccess(follower.unitId, followerGoal, true);
+        } else {
+          handlePathFailure(follower.unitId, 'goal-not-walkable', true);
+        }
       }
     } else {
       handlePathFailure(unitId, 'goal-not-walkable');
+      for (const follower of followers) {
+        handlePathFailure(follower.unitId, 'goal-not-walkable', true);
+      }
     }
     return;
   }
@@ -782,12 +868,14 @@ const processNextRequest = () => {
   const cached = reuseCachedPath(startCell, goalCell);
   if (cached) {
     applySolution(unitId, clampedGoal, startCell, cached);
+    deliverFollowers(followers, goalCell);
     return;
   }
 
   const solution = solvePath(startCell, goalCell);
   storePathInCache(startCell, goalCell, solution);
   applySolution(unitId, clampedGoal, startCell, solution);
+  deliverFollowers(followers, goalCell);
 };
 
 const projectMoveInternal = (from: Vector3, to: Vector3): Vector3 => {
@@ -852,6 +940,8 @@ export const NavMeshManager = {
     navState.obstacles.clear();
     requestQueue.length = 0;
     pendingRequests.clear();
+    queuedRequestsByKey.clear();
+    followersByKey.clear();
     navState.maxSearchRadius = 0;
     invalidatePathCache();
     updateDiagnostics({
@@ -888,7 +978,12 @@ export const NavMeshManager = {
     navState.occupancy.fill(0);
     navState.matrix = Array.from({ length: height }, () => new Array(width).fill(0));
     navState.obstacles.clear();
+    requestQueue.length = 0;
+    pendingRequests.clear();
+    queuedRequestsByKey.clear();
+    followersByKey.clear();
     navState.maxSearchRadius = Math.ceil(Math.hypot(width, height));
+    updateDiagnostics({ queueDepth: 0, pending: 0 });
 
     const unitRadii = Object.values(COLLISION_DATA.UNITS).map(u => u.radius);
     const maxUnitRadius = unitRadii.length ? Math.max(...unitRadii) : 0.5;
@@ -912,8 +1007,49 @@ export const NavMeshManager = {
 
   requestPath(unitId: string, startPos: Vector3, endPos: Vector3) {
     if (!navState.ready || pendingRequests.has(unitId)) return;
-    pendingRequests.add(unitId);
-    requestQueue.push({ unitId, start: { ...startPos, y: 0 }, goal: { ...endPos, y: 0 } });
+
+    const start = clampToWorld(startPos);
+    const goal = clampToWorld(endPos);
+    const startCell = findNearestWalkableCell(worldToCell(start.x, start.z));
+    const goalCell = findNearestWalkableCell(worldToCell(goal.x, goal.z));
+    const key = startCell && goalCell ? cacheKeyFor(startCell, goalCell) : null;
+
+    if (key) {
+      const existing = queuedRequestsByKey.get(key);
+      if (existing) {
+        const follower: PathFollower = {
+          unitId,
+          start,
+          goal,
+          startCell,
+          goalCell
+        };
+        const group = followersByKey.get(key);
+        if (group) {
+          group.push(follower);
+        } else {
+          followersByKey.set(key, [follower]);
+        }
+        pendingRequests.set(unitId, key);
+        updateDiagnostics({ queueDepth: requestQueue.length, pending: pendingRequests.size });
+        return;
+      }
+    }
+
+    const request: PathRequest = {
+      unitId,
+      start,
+      goal,
+      startCell,
+      goalCell,
+      key
+    };
+
+    requestQueue.push(request);
+    pendingRequests.set(unitId, key);
+    if (key) {
+      queuedRequestsByKey.set(key, request);
+    }
     updateDiagnostics({ queueDepth: requestQueue.length, pending: pendingRequests.size });
   },
 
@@ -956,6 +1092,8 @@ export const NavMeshManager = {
     navState.obstacles.clear();
     requestQueue.length = 0;
     pendingRequests.clear();
+    queuedRequestsByKey.clear();
+    followersByKey.clear();
     invalidatePathCache();
     updateDiagnostics({
       lastSearchMs: 0,
