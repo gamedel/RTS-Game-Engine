@@ -55,15 +55,18 @@ type NavState = {
 const WORLD_SIZE = 320;
 const HALF_WORLD = WORLD_SIZE / 2;
 const CELL_SIZE = 1;
-const SAMPLE_STEP = CELL_SIZE * 0.5;
-const MAX_QUEUE_BATCH = 64;
-const MAX_QUEUE_TIME_MS = 4;
+const SAMPLE_STEP = CELL_SIZE * 0.35;
+const MAX_QUEUE_BATCH = 96;
+const MAX_QUEUE_TIME_MS = 5;
 const EPSILON = 1e-4;
-const CACHE_BRIDGE_RADIUS_CELLS = 16;
-const BUILDING_EXTRA_PADDING = 0.85;
-const CLEARANCE_MARGIN = 0.65;
-const FLOW_FIELD_TTL = 3000;
-const FLOW_FIELD_CACHE_MAX = 48;
+const CACHE_BRIDGE_RADIUS_CELLS = 20;
+const BUILDING_EXTRA_PADDING = 1.05;
+const CLEARANCE_MARGIN = 0.9;
+const FLOW_FIELD_TTL = 4500;
+const FLOW_FIELD_CACHE_MAX = 64;
+const REPULSION_MARGIN = 0.85;
+const REPULSION_STRENGTH = 1.25;
+const REPULSION_MIN_THRESHOLD = 0.1;
 
 const now = typeof performance !== 'undefined' ? () => performance.now() : () => Date.now();
 
@@ -723,6 +726,36 @@ const solveWithFlowField = (start: Cell, goal: Cell): PathSolution | null => {
   return { cells, reachedGoal: true, expanded: cells.length, elapsedMs: 0 };
 };
 
+const pathFromFlowField = (start: Cell, field: FlowField): PathSolution | null => {
+  const startIdx = indexForCell(start);
+  if (startIdx < 0) return null;
+  if (field.parents[startIdx] === -1 && startIdx !== field.goalIdx) {
+    return null;
+  }
+  if (!navState.grid) return null;
+
+  const limit = navState.grid.width * navState.grid.height + 1;
+  const visited = new Set<number>();
+  const cells: Cell[] = [];
+  let currentIdx = startIdx;
+
+  for (let steps = 0; steps < limit; steps++) {
+    if (visited.has(currentIdx)) return null;
+    visited.add(currentIdx);
+    const cell = cellFromIndex(currentIdx);
+    if (!cell) return null;
+    cells.push(cell);
+    if (currentIdx === field.goalIdx) {
+      return { cells, reachedGoal: true, expanded: cells.length, elapsedMs: 0 };
+    }
+    const nextIdx = field.parents[currentIdx];
+    if (nextIdx < 0) break;
+    currentIdx = nextIdx;
+  }
+
+  return null;
+};
+
 const simplifyCells = (cells: Cell[]): Cell[] => {
   if (cells.length <= 2) return cells;
   const result: Cell[] = [cells[0]];
@@ -981,8 +1014,17 @@ const applySolution = (
   navState.dispatch({ type: 'UPDATE_UNIT', payload: { id: unitId, path: waypoints, pathIndex: 0, pathTarget: clampToWorld(goal) } });
 };
 
-const deliverFollowers = (followers: PathFollower[], referenceGoalCell: Cell) => {
+const deliverFollowers = (
+  followers: PathFollower[],
+  referenceGoalCell: Cell,
+  referenceSolution: PathSolution
+) => {
   if (!followers.length) return;
+
+  const referenceCached: CachedPath | null = referenceSolution.cells.length
+    ? { cells: referenceSolution.cells, timestamp: now(), reachedGoal: referenceSolution.reachedGoal }
+    : null;
+  const flowField = getFlowField(referenceGoalCell);
 
   for (const follower of followers) {
     const followerGoal = clampToWorld(follower.goal);
@@ -995,7 +1037,22 @@ const deliverFollowers = (followers: PathFollower[], referenceGoalCell: Cell) =>
       continue;
     }
 
-    const solution = computePathSolution(startCell, goalCell);
+    let solution: PathSolution | null = null;
+    if (referenceCached) {
+      solution = bridgeCachedPath(startCell, referenceCached);
+    }
+    if (!solution && flowField) {
+      solution = pathFromFlowField(startCell, flowField);
+    }
+    if (!solution) {
+      solution = computePathSolution(startCell, goalCell);
+    }
+
+    if (!solution) {
+      handlePathFailure(follower.unitId, 'no-path', true);
+      continue;
+    }
+
     applySolution(follower.unitId, followerGoal, startCell, solution, true);
   }
 };
@@ -1050,7 +1107,7 @@ const processNextRequest = () => {
 
   const solution = computePathSolution(startCell, goalCell);
   applySolution(unitId, clampedGoal, startCell, solution);
-  deliverFollowers(followers, goalCell);
+  deliverFollowers(followers, goalCell, solution);
 };
 
 const projectMoveInternal = (from: Vector3, to: Vector3): Vector3 => {
@@ -1078,17 +1135,98 @@ const projectMoveInternal = (from: Vector3, to: Vector3): Vector3 => {
   return lastValid;
 };
 
+const sampleClearanceAt = (point: Vector3): number => {
+  if (!isGridReady() || !navState.clearance) return Number.POSITIVE_INFINITY;
+  ensureClearance();
+  const clamped = clampToWorld(point);
+  const cell = worldToCell(clamped.x, clamped.z);
+  if (!cell) return Number.POSITIVE_INFINITY;
+  const idx = indexForCell(cell);
+  if (idx < 0) return Number.POSITIVE_INFINITY;
+  const value = navState.clearance[idx];
+  return Number.isFinite(value) ? value : Number.POSITIVE_INFINITY;
+};
+
+const sampleClearanceAtOffset = (point: Vector3, dx: number, dz: number): number => {
+  return sampleClearanceAt({ x: point.x + dx, y: 0, z: point.z + dz });
+};
+
+const clearanceGradient = (point: Vector3): { x: number; z: number } => {
+  if (!isGridReady() || !navState.grid) {
+    return { x: 0, z: 0 };
+  }
+  const step = navState.grid.cellSize;
+  const right = sampleClearanceAtOffset(point, step, 0);
+  const left = sampleClearanceAtOffset(point, -step, 0);
+  const forward = sampleClearanceAtOffset(point, 0, step);
+  const backward = sampleClearanceAtOffset(point, 0, -step);
+  const denom = step * 2 || 1;
+  const gradX = (right - left) / denom;
+  const gradZ = (forward - backward) / denom;
+  return {
+    x: Number.isFinite(gradX) ? gradX : 0,
+    z: Number.isFinite(gradZ) ? gradZ : 0
+  };
+};
+
+const computeRepulsionVector = (point: Vector3): { x: number; z: number } | null => {
+  if (!isGridReady() || !navState.grid) return null;
+  const clearance = sampleClearanceAt(point);
+  if (!isFinite(clearance)) return null;
+  const desiredClearance = navState.requiredClearance + navState.agentPadding * REPULSION_MARGIN;
+  if (clearance >= desiredClearance - EPSILON) return null;
+  const gradient = clearanceGradient(point);
+  const magnitude = Math.hypot(gradient.x, gradient.z);
+  if (magnitude < EPSILON) return null;
+  const normalized = { x: gradient.x / magnitude, z: gradient.z / magnitude };
+  const deficit = Math.max(0, desiredClearance - clearance);
+  const strength = Math.min(
+    REPULSION_STRENGTH,
+    Math.max(deficit / (desiredClearance + EPSILON), REPULSION_MIN_THRESHOLD)
+  );
+  return {
+    x: normalized.x * strength,
+    z: normalized.z * strength
+  };
+};
+
 const advanceOnNavInternal = (from: Vector3, to: Vector3, maxStep: number): Vector3 => {
   const distance = Math.hypot(to.x - from.x, to.z - from.z);
   if (distance < EPSILON) return clampToWorld(to);
   const clampedStep = Math.min(maxStep, distance);
   const direction = { x: (to.x - from.x) / distance, z: (to.z - from.z) / distance };
-  const target = {
+  const baseTarget = {
     x: from.x + direction.x * clampedStep,
     y: 0,
     z: from.z + direction.z * clampedStep
   };
-  return projectMoveInternal(from, target);
+
+  const projected = projectMoveInternal(from, baseTarget);
+  if (!navState.ready) {
+    return projected;
+  }
+
+  const repulsion = computeRepulsionVector(projected);
+  if (!repulsion) {
+    return projected;
+  }
+
+  const combined = {
+    x: direction.x + repulsion.x,
+    z: direction.z + repulsion.z
+  };
+  const combinedLength = Math.hypot(combined.x, combined.z);
+  if (combinedLength < EPSILON) {
+    return projected;
+  }
+
+  const adjustedDirection = { x: combined.x / combinedLength, z: combined.z / combinedLength };
+  const adjustedTarget = {
+    x: from.x + adjustedDirection.x * clampedStep,
+    y: 0,
+    z: from.z + adjustedDirection.z * clampedStep
+  };
+  return projectMoveInternal(from, adjustedTarget);
 };
 
 const snapToNavInternal = (point: Vector3): Vector3 => {

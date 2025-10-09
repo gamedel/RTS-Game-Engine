@@ -2,8 +2,8 @@ import { Unit, Building } from '../../types';
 import { COLLISION_DATA } from '../../constants';
 import * as THREE from 'three';
 
-const BUILDING_DEPENETRATION_PADDING = 0.8;
-const MIN_PUSH_EPSILON = 0.05;
+const BUILDING_DEPENETRATION_PADDING = 1.1;
+const MIN_PUSH_EPSILON = 0.12;
 
 export function getDepenetrationVector(unit: Unit, building: Building): { x: number, z: number } | null {
     const unitRadius = COLLISION_DATA.UNITS[unit.unitType].radius;
