@@ -66,6 +66,22 @@ const navState: NavState = {
 const requestQueue: PathRequest[] = [];
 const pendingRequests = new Set<string>();
 
+const PATH_CACHE_CLUSTER = 3;
+const PATH_CACHE_TTL = 2000;
+const PATH_CACHE_MAX = 256;
+
+type CachedPath = { cells: Cell[]; timestamp: number; reachedGoal: boolean };
+
+const pathCache = new Map<string, CachedPath>();
+
+const clusterKeyForCell = (cell: Cell) =>
+  `${Math.floor(cell.cx / PATH_CACHE_CLUSTER)}|${Math.floor(cell.cz / PATH_CACHE_CLUSTER)}`;
+const cacheKeyFor = (start: Cell, goal: Cell) => `${clusterKeyForCell(start)}->${encodeCell(goal)}`;
+
+const invalidatePathCache = () => {
+  pathCache.clear();
+};
+
 type HeapNode = {
   idx: number;
   cell: Cell;
@@ -238,39 +254,6 @@ const eachCellInRect = (minX: number, maxX: number, minZ: number, maxZ: number):
   return cells;
 };
 
-const eachCellInDisc = (center: Vector3, radius: number): number[] => {
-  if (!navState.grid) return [];
-  const cells: number[] = [];
-  const totalRadius = radius + navState.agentPadding;
-  const minX = center.x - totalRadius;
-  const maxX = center.x + totalRadius;
-  const minZ = center.z - totalRadius;
-  const maxZ = center.z + totalRadius;
-
-  const minCx = Math.floor((minX - navState.grid.originX) / navState.grid.cellSize);
-  const maxCx = Math.floor((maxX - navState.grid.originX) / navState.grid.cellSize);
-  const minCz = Math.floor((minZ - navState.grid.originZ) / navState.grid.cellSize);
-  const maxCz = Math.floor((maxZ - navState.grid.originZ) / navState.grid.cellSize);
-
-  const radiusSq = totalRadius * totalRadius;
-
-  for (let cz = minCz; cz <= maxCz; cz++) {
-    for (let cx = minCx; cx <= maxCx; cx++) {
-      const cell = { cx, cz };
-      if (!isCellInside(cell)) continue;
-      const worldPos = cellToWorld(cell);
-      const dx = worldPos.x - center.x;
-      const dz = worldPos.z - center.z;
-      if (dx * dx + dz * dz <= radiusSq) {
-        const idx = indexForCell(cell);
-        if (idx >= 0) cells.push(idx);
-      }
-    }
-  }
-
-  return cells;
-};
-
 const registerBuildingObstacle = (building: Building) => {
   if (!navState.grid) return;
   if (building.constructionProgress !== undefined) return;
@@ -287,17 +270,9 @@ const registerBuildingObstacle = (building: Building) => {
   markCells(`building:${building.id}`, cells);
 };
 
-const registerResourceObstacle = (resource: ResourceNode) => {
-  if (!navState.grid) return;
-  if (resource.amount <= 0 || resource.isFalling) return;
-  const collision = COLLISION_DATA.RESOURCES[resource.resourceType];
-  if (!collision) return;
-  const cells = eachCellInDisc(resource.position, collision.radius);
-  markCells(`resource:${resource.id}`, cells);
-};
-
-const rebuildStaticObstacles = (buildings: Record<string, Building>, resources: Record<string, ResourceNode>) => {
+const rebuildStaticObstacles = (buildings: Record<string, Building>, _resources: Record<string, ResourceNode>) => {
   if (!isGridReady()) return;
+  invalidatePathCache();
   navState.obstacles.clear();
   navState.occupancy.fill(0);
   navState.walkable.fill(1);
@@ -308,7 +283,6 @@ const rebuildStaticObstacles = (buildings: Record<string, Building>, resources: 
   }
 
   Object.values(buildings).forEach(registerBuildingObstacle);
-  Object.values(resources).forEach(registerResourceObstacle);
 };
 
 const getNeighbors = (cell: Cell): Cell[] => {
@@ -393,6 +367,59 @@ const lineIsClear = (start: Cell, end: Cell) => {
   return true;
 };
 
+type PathSolution = {
+  cells: Cell[];
+  reachedGoal: boolean;
+  expanded: number;
+  elapsedMs: number;
+  failureReason?: string;
+};
+
+const pruneCache = () => {
+  if (pathCache.size <= PATH_CACHE_MAX) return;
+  const entries = [...pathCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp);
+  const toRemove = entries.length - PATH_CACHE_MAX;
+  for (let i = 0; i < toRemove; i++) {
+    pathCache.delete(entries[i][0]);
+  }
+};
+
+const storePathInCache = (start: Cell, goal: Cell, solution: PathSolution) => {
+  if (!solution.cells.length) return;
+  const key = cacheKeyFor(start, goal);
+  pathCache.set(key, { cells: solution.cells, timestamp: now(), reachedGoal: solution.reachedGoal });
+  pruneCache();
+};
+
+const reuseCachedPath = (start: Cell, goal: Cell): PathSolution | null => {
+  const key = cacheKeyFor(start, goal);
+  const cached = pathCache.get(key);
+  if (!cached) return null;
+  if (now() - cached.timestamp > PATH_CACHE_TTL) {
+    pathCache.delete(key);
+    return null;
+  }
+
+  for (let i = 0; i < cached.cells.length; i++) {
+    const candidate = cached.cells[i];
+    if (!isCellInside(candidate)) continue;
+    if (!isCellWalkable(candidate)) continue;
+    if (!lineIsClear(start, candidate)) continue;
+
+    const remainder = cached.cells.slice(i);
+    let cells: Cell[];
+    if (remainder.length && remainder[0].cx === start.cx && remainder[0].cz === start.cz) {
+      cells = remainder;
+    } else {
+      cells = [start, ...remainder];
+    }
+    cached.timestamp = now();
+    return { cells, reachedGoal: cached.reachedGoal, expanded: 0, elapsedMs: 0 };
+  }
+
+  return null;
+};
+
 const simplifyCells = (cells: Cell[]): Cell[] => {
   if (cells.length <= 2) return cells;
   const result: Cell[] = [cells[0]];
@@ -437,14 +464,6 @@ const reconstructPath = (parents: Map<number, number>, startIdx: number, endIdx:
   }
   path.reverse();
   return path;
-};
-
-type PathSolution = {
-  cells: Cell[];
-  reachedGoal: boolean;
-  expanded: number;
-  elapsedMs: number;
-  failureReason?: string;
 };
 
 const solvePath = (start: Cell, goal: Cell): PathSolution => {
@@ -654,7 +673,14 @@ const processNextRequest = () => {
     return;
   }
 
+  const cached = reuseCachedPath(startCell, goalCell);
+  if (cached) {
+    applySolution(unitId, clampedGoal, startCell, cached);
+    return;
+  }
+
   const solution = solvePath(startCell, goalCell);
+  storePathInCache(startCell, goalCell, solution);
   applySolution(unitId, clampedGoal, startCell, solution);
 };
 
@@ -721,6 +747,7 @@ export const NavMeshManager = {
     requestQueue.length = 0;
     pendingRequests.clear();
     navState.maxSearchRadius = 0;
+    invalidatePathCache();
     updateDiagnostics({
       lastSearchMs: 0,
       lastSearchExpanded: 0,
@@ -767,11 +794,13 @@ export const NavMeshManager = {
 
   addObstacle(building: Building) {
     if (!isGridReady()) return;
+    invalidatePathCache();
     registerBuildingObstacle(building);
   },
 
   removeObstacle(building: Building) {
     if (!isGridReady()) return;
+    invalidatePathCache();
     unmarkCells(`building:${building.id}`);
   },
 
@@ -821,6 +850,7 @@ export const NavMeshManager = {
     navState.obstacles.clear();
     requestQueue.length = 0;
     pendingRequests.clear();
+    invalidatePathCache();
     updateDiagnostics({
       lastSearchMs: 0,
       lastSearchExpanded: 0,
