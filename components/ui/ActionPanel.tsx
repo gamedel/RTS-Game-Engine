@@ -6,13 +6,14 @@ import { AggressiveIcon, HoldGroundIcon, UnitTypeIcon, CatapultIcon, PopulationI
 import { useLocalization } from '../../hooks/useLocalization';
 
 
-const TrainActionButton: React.FC<{ 
-    type: UnitType, 
-    player: Player, 
+const TrainActionButton: React.FC<{
+    type: UnitType,
+    player: Player,
     onClick: () => void,
     isDisabled?: boolean,
     tooltipOverride?: string,
-}> = ({ type, player, onClick, isDisabled: extraDisabled, tooltipOverride }) => {
+    isTouchDevice: boolean,
+}> = ({ type, player, onClick, isDisabled: extraDisabled, tooltipOverride, isTouchDevice }) => {
     const { t } = useLocalization();
     const config = UNIT_CONFIG[type];
     const canAfford = player.resources.gold >= config.cost.gold && player.resources.wood >= config.cost.wood;
@@ -24,21 +25,26 @@ const TrainActionButton: React.FC<{
     if (popLimitReached) tooltip = t('ui.popLimitReached');
     else if (!canAfford) tooltip = t('ui.notEnoughResources');
 
+    const sizeClasses = isTouchDevice ? 'w-28 h-28 p-3 gap-1' : 'w-24 h-20 p-2';
+    const textPrimary = isTouchDevice ? 'font-bold text-base' : 'font-bold text-sm';
+    const textSecondary = isTouchDevice ? 'text-sm' : 'text-xs';
+    const iconSize = isTouchDevice ? 40 : 32;
+
     return (
         <button
             onClick={onClick}
             disabled={isDisabled}
             title={tooltip}
-            className={`w-24 h-20 p-2 rounded-md flex flex-col items-center justify-center text-center transition-all duration-150 ${!isDisabled ? 'bg-green-700/80 hover:bg-green-600/80 ring-1 ring-green-500' : 'bg-gray-700/80 text-gray-400 cursor-not-allowed ring-1 ring-gray-600'}`}
+            className={`${sizeClasses} rounded-md flex flex-col items-center justify-center text-center transition-all duration-150 ${!isDisabled ? 'bg-green-700/80 hover:bg-green-600/80 ring-1 ring-green-500' : 'bg-gray-700/80 text-gray-400 cursor-not-allowed ring-1 ring-gray-600'}`}
         >
-            <UnitTypeIcon type={type} style={{ width: '32px', height: '32px' }}/>
-            <p className="font-bold text-sm mt-1">{t('ui.train', {unitType: unitTypeName})}</p>
-            <p className="text-xs mt-1">G:{config.cost.gold} W:{config.cost.wood}</p>
+            <UnitTypeIcon type={type} style={{ width: `${iconSize}px`, height: `${iconSize}px` }}/>
+            <p className={`${textPrimary} mt-1`}>{t('ui.train', {unitType: unitTypeName})}</p>
+            <p className={`${textSecondary} mt-1`}>G:{config.cost.gold} W:{config.cost.wood}</p>
         </button>
     );
 };
 
-const MultiBuildingActionPanel: React.FC<{ buildings: Building[], player: Player, dispatch: React.Dispatch<Action> }> = ({ buildings, player, dispatch }) => {
+const MultiBuildingActionPanel: React.FC<{ buildings: Building[], player: Player, dispatch: React.Dispatch<Action>, isTouchDevice: boolean }> = ({ buildings, player, dispatch, isTouchDevice }) => {
     const { t } = useLocalization();
     const buildingType = buildings[0].buildingType;
 
@@ -67,30 +73,31 @@ const MultiBuildingActionPanel: React.FC<{ buildings: Building[], player: Player
 
     return (
         <div className="p-2">
-            <div className="flex gap-2 items-start flex-wrap">
+            <div className={`flex items-start flex-wrap ${isTouchDevice ? 'gap-3' : 'gap-2'}`}>
                 {unitsToTrain.map(unitType => (
-                    <TrainActionButton 
+                    <TrainActionButton
                         key={unitType}
                         type={unitType}
                         player={player}
                         onClick={() => handleTrain(unitType)}
                         isDisabled={!isAnyQueueNotFull}
+                        isTouchDevice={isTouchDevice}
                     />
                 ))}
             </div>
             {combinedQueue.length > 0 && (
                 <div className="mt-2">
-                    <h4 className="text-sm font-bold text-gray-300">{t('ui.combinedQueue')} ({combinedQueue.length})</h4>
-                    <div className="flex flex-wrap gap-2 mt-1 bg-slate-800/50 p-1 rounded-md custom-scrollbar overflow-x-auto">
+                    <h4 className={`${isTouchDevice ? 'text-base' : 'text-sm'} font-bold text-gray-300`}>{t('ui.combinedQueue')} ({combinedQueue.length})</h4>
+                    <div className={`flex flex-wrap ${isTouchDevice ? 'gap-3 mt-2 p-2' : 'gap-2 mt-1 p-1'} bg-slate-800/50 rounded-md custom-scrollbar overflow-x-auto`}>
                         {combinedQueue.map((item, index) => {
                             const unitTypeName = t(`unit.${item.unitType}`);
                             return (
                                 <div
                                     key={`train-${index}`}
                                     title={unitTypeName}
-                                    className="relative w-12 h-12 bg-gray-700 rounded-md text-center flex items-center justify-center overflow-hidden ring-1 ring-slate-600"
+                                    className={`relative ${isTouchDevice ? 'w-14 h-14' : 'w-12 h-12'} bg-gray-700 rounded-md text-center flex items-center justify-center overflow-hidden ring-1 ring-slate-600`}
                                 >
-                                    <UnitTypeIcon type={item.unitType} style={{ width: '28px', height: '28px', color: 'white' }} />
+                                    <UnitTypeIcon type={item.unitType} style={{ width: isTouchDevice ? '32px' : '28px', height: isTouchDevice ? '32px' : '28px', color: 'white' }} />
                                 </div>
                             );
                         })}
@@ -101,7 +108,7 @@ const MultiBuildingActionPanel: React.FC<{ buildings: Building[], player: Player
     );
 };
 
-const UpgradeTowerButton: React.FC<{ building: Building, player: Player, dispatch: React.Dispatch<Action> }> = ({ building, player, dispatch }) => {
+const UpgradeTowerButton: React.FC<{ building: Building, player: Player, dispatch: React.Dispatch<Action>, isTouchDevice: boolean }> = ({ building, player, dispatch, isTouchDevice }) => {
     const { t } = useLocalization();
     const config = TOWER_UPGRADE_CONFIG;
     const canAfford = player.resources.gold >= config.cost.gold && player.resources.wood >= config.cost.wood;
@@ -113,21 +120,26 @@ const UpgradeTowerButton: React.FC<{ building: Building, player: Player, dispatc
     else if (isBusy) tooltip = t('ui.upgradeInProgress');
     else if (!canAfford) tooltip = t('ui.notEnoughResources');
 
+    const sizeClasses = isTouchDevice ? 'w-28 h-28 p-3 gap-1' : 'w-24 h-20 p-2';
+    const textPrimary = isTouchDevice ? 'font-bold text-sm' : 'font-bold text-xs';
+    const textSecondary = isTouchDevice ? 'text-sm' : 'text-xs';
+    const iconSize = isTouchDevice ? 40 : 32;
+
     return (
         <button
             onClick={() => dispatch({ type: 'UPGRADE_TOWER', payload: { buildingId: building.id } })}
             disabled={isDisabled}
             title={tooltip}
-            className={`w-24 h-20 p-2 rounded-md flex flex-col items-center justify-center text-center transition-all duration-150 ${!isDisabled ? 'bg-orange-700/80 hover:bg-orange-600/80 ring-1 ring-orange-500' : 'bg-gray-700/80 text-gray-400 cursor-not-allowed ring-1 ring-gray-600'}`}
+            className={`${sizeClasses} rounded-md flex flex-col items-center justify-center text-center transition-all duration-150 ${!isDisabled ? 'bg-orange-700/80 hover:bg-orange-600/80 ring-1 ring-orange-500' : 'bg-gray-700/80 text-gray-400 cursor-not-allowed ring-1 ring-gray-600'}`}
         >
-            <CatapultIcon style={{ width: '32px', height: '32px' }}/>
-            <p className="font-bold text-xs mt-1">{t('ui.installCatapult')}</p>
-            <p className="text-xs mt-1">G:{config.cost.gold} W:{config.cost.wood}</p>
+            <CatapultIcon style={{ width: `${iconSize}px`, height: `${iconSize}px` }}/>
+            <p className={`${textPrimary} mt-1`}>{t('ui.installCatapult')}</p>
+            <p className={`${textSecondary} mt-1`}>G:{config.cost.gold} W:{config.cost.wood}</p>
         </button>
     );
 };
 
-const ResearchActionButton: React.FC<{ category: ResearchCategory, player: Player, building: Building, dispatch: React.Dispatch<Action> }> = ({ category, player, building, dispatch }) => {
+const ResearchActionButton: React.FC<{ category: ResearchCategory, player: Player, building: Building, dispatch: React.Dispatch<Action>, isTouchDevice: boolean }> = ({ category, player, building, dispatch, isTouchDevice }) => {
     const { t } = useLocalization();
     const researchInfo = RESEARCH_CONFIG[category];
     const currentLevel = player.research[category];
@@ -135,16 +147,16 @@ const ResearchActionButton: React.FC<{ category: ResearchCategory, player: Playe
 
     if (currentLevel >= researchInfo.maxLevel) {
         return (
-            <div className="flex items-center justify-between p-2 rounded-md ring-1 shadow-inner bg-green-900 ring-green-600 text-green-300">
-                <span className="font-semibold text-sm">{researchName}</span>
+            <div className={`flex items-center justify-between rounded-md ring-1 shadow-inner bg-green-900 ring-green-600 text-green-300 ${isTouchDevice ? 'p-3 text-base' : 'p-2'}`}>
+                <span className={`font-semibold ${isTouchDevice ? 'text-base' : 'text-sm'}`}>{researchName}</span>
                 <div className="text-right">
-                    <p className="font-semibold text-xs">{t('ui.maxLevel')}</p>
-                    <p className="text-xs text-green-400">({currentLevel}/{researchInfo.maxLevel})</p>
+                    <p className={`font-semibold ${isTouchDevice ? 'text-sm' : 'text-xs'}`}>{t('ui.maxLevel')}</p>
+                    <p className={`${isTouchDevice ? 'text-sm' : 'text-xs'} text-green-400`}>({currentLevel}/{researchInfo.maxLevel})</p>
                 </div>
             </div>
         );
     }
-    
+
     const cost = researchInfo.cost(currentLevel);
     const canAfford = player.resources.gold >= cost.gold && player.resources.wood >= cost.wood;
     const isBusy = building.researchQueue && building.researchQueue.length > 0;
@@ -159,19 +171,19 @@ const ResearchActionButton: React.FC<{ category: ResearchCategory, player: Playe
             onClick={() => dispatch({ type: 'START_RESEARCH', payload: { buildingId: building.id, researchType: category } })}
             disabled={isDisabled}
             title={tooltip}
-            className={`flex items-center justify-between p-2 rounded-md ring-1 shadow-inner transition-all duration-200
+            className={`flex items-center justify-between rounded-md ring-1 shadow-inner transition-all duration-200 ${isTouchDevice ? 'p-3' : 'p-2'}
                 ${!isDisabled ? 'bg-slate-800 hover:bg-slate-700 ring-slate-600 text-white' : 'bg-slate-700/80 text-gray-400 cursor-not-allowed ring-slate-600'}`}
         >
-            <span className="font-semibold text-sm">{researchName}</span>
+            <span className={`font-semibold ${isTouchDevice ? 'text-base' : 'text-sm'}`}>{researchName}</span>
             <div className="text-right">
-                <p className="font-semibold text-xs">{t('ui.level', { level: currentLevel + 1 })}</p>
-                <p className="text-xs text-slate-300">G:{cost.gold} W:{cost.wood}</p>
+                <p className={`font-semibold ${isTouchDevice ? 'text-sm' : 'text-xs'}`}>{t('ui.level', { level: currentLevel + 1 })}</p>
+                <p className={`${isTouchDevice ? 'text-sm' : 'text-xs'} text-slate-300`}>G:{cost.gold} W:{cost.wood}</p>
             </div>
         </button>
     );
 };
 
-const BuildActionButton: React.FC<{ type: BuildingType, player: Player, dispatch: React.Dispatch<Action> }> = ({ type, player, dispatch }) => {
+const BuildActionButton: React.FC<{ type: BuildingType, player: Player, dispatch: React.Dispatch<Action>, isTouchDevice: boolean }> = ({ type, player, dispatch, isTouchDevice }) => {
     const { t } = useLocalization();
     const config = BUILDING_CONFIG[type];
     const canAfford = player.resources.gold >= config.cost.gold && player.resources.wood >= config.cost.wood;
@@ -180,15 +192,15 @@ const BuildActionButton: React.FC<{ type: BuildingType, player: Player, dispatch
         <button
             onClick={() => dispatch({ type: 'SET_BUILD_MODE', payload: type })}
             disabled={!canAfford}
-            className={`w-24 h-20 p-2 rounded-md flex flex-col items-center justify-center text-center transition-all duration-150 ${canAfford ? 'bg-blue-700/80 hover:bg-blue-600/80 ring-1 ring-blue-500' : 'bg-gray-700/80 text-gray-400 cursor-not-allowed ring-1 ring-gray-600'}`}
+            className={`${isTouchDevice ? 'w-28 h-28 p-3 gap-1' : 'w-24 h-20 p-2'} rounded-md flex flex-col items-center justify-center text-center transition-all duration-150 ${canAfford ? 'bg-blue-700/80 hover:bg-blue-600/80 ring-1 ring-blue-500' : 'bg-gray-700/80 text-gray-400 cursor-not-allowed ring-1 ring-gray-600'}`}
         >
-            <p className="font-bold text-sm">{t('ui.build', {buildingType: buildingTypeName})}</p>
-            <p className="text-xs mt-1">G:{config.cost.gold} W:{config.cost.wood}</p>
+            <p className={`font-bold ${isTouchDevice ? 'text-base' : 'text-sm'}`}>{t('ui.build', {buildingType: buildingTypeName})}</p>
+            <p className={`${isTouchDevice ? 'text-sm' : 'text-xs'} mt-1`}>G:{config.cost.gold} W:{config.cost.wood}</p>
         </button>
     );
 };
 
-const TrainingQueue: React.FC<{ building: Building, player: Player, dispatch: React.Dispatch<Action> }> = ({ building, player, dispatch }) => {
+const TrainingQueue: React.FC<{ building: Building, player: Player, dispatch: React.Dispatch<Action>, isTouchDevice: boolean }> = ({ building, player, dispatch, isTouchDevice }) => {
     const { t } = useLocalization();
     const isPlayerBuilding = player.isHuman;
 
@@ -199,8 +211,8 @@ const TrainingQueue: React.FC<{ building: Building, player: Player, dispatch: Re
 
     return (
         <div className="mt-2">
-            <h4 className="text-sm font-bold text-gray-300">{t('ui.queue')}</h4>
-            <div className="flex space-x-2 mt-1 bg-slate-800/50 p-1 rounded-md">
+            <h4 className={`${isTouchDevice ? 'text-base' : 'text-sm'} font-bold text-gray-300`}>{t('ui.queue')}</h4>
+            <div className={`flex ${isTouchDevice ? 'space-x-3 mt-2 p-2' : 'space-x-2 mt-1 p-1'} bg-slate-800/50 rounded-md`}>
                 {queue.map((item, index) => {
                     const popCapReached = player.population.current >= player.population.cap;
                     const isPaused = index === 0 && popCapReached;
@@ -213,7 +225,7 @@ const TrainingQueue: React.FC<{ building: Building, player: Player, dispatch: Re
                             key={`train-${index}`}
                             onClick={isPlayerBuilding ? () => dispatch({ type: 'CANCEL_TRAIN_UNIT', payload: { buildingId: building.id, queueIndex: index } }) : undefined}
                             title={isPlayerBuilding ? t('ui.cancelTrain', { unitType: unitTypeName }) : t('ui.inQueue', { unitType: unitTypeName })}
-                            className={`relative w-12 h-12 bg-gray-700 rounded-md text-center flex items-center justify-center overflow-hidden ring-1 ring-slate-600 transition-all ${isPlayerBuilding ? 'hover:ring-red-500 hover:ring-2' : ''}`}
+                            className={`relative ${isTouchDevice ? 'w-14 h-14 text-sm' : 'w-12 h-12 text-xs'} bg-gray-700 rounded-md text-center flex items-center justify-center overflow-hidden ring-1 ring-slate-600 transition-all ${isPlayerBuilding ? 'hover:ring-red-500 hover:ring-2' : ''}`}
                         >
                              <div className="absolute bottom-0 left-0 h-full bg-green-500/50" style={{ width: `${index === 0 ? progress : 0}%` }}></div>
                              {isPaused && (
@@ -221,7 +233,7 @@ const TrainingQueue: React.FC<{ building: Building, player: Player, dispatch: Re
                                     <PopulationIcon />
                                 </div>
                              )}
-                             <p className="text-xs font-bold z-10">{item.unitType.slice(0, 4)}</p>
+                             <p className={`font-bold z-10 ${isTouchDevice ? 'text-sm' : 'text-xs'}`}>{item.unitType.slice(0, 4)}</p>
                         </button>
                     );
                 })}
@@ -234,10 +246,10 @@ const TrainingQueue: React.FC<{ building: Building, player: Player, dispatch: Re
                             key={`research-${index}`}
                             onClick={isPlayerBuilding ? () => dispatch({ type: 'CANCEL_RESEARCH', payload: { buildingId: building.id } }) : undefined}
                             title={isPlayerBuilding ? t('ui.cancelResearch') : t('ui.researching', { researchName })}
-                            className={`relative w-12 h-12 bg-gray-700 rounded-md text-center flex items-center justify-center overflow-hidden ring-1 ring-slate-600 transition-all ${isPlayerBuilding ? 'hover:ring-red-500 hover:ring-2' : ''}`}
+                            className={`relative ${isTouchDevice ? 'w-14 h-14 text-sm' : 'w-12 h-12 text-xs'} bg-gray-700 rounded-md text-center flex items-center justify-center overflow-hidden ring-1 ring-slate-600 transition-all ${isPlayerBuilding ? 'hover:ring-red-500 hover:ring-2' : ''}`}
                         >
                              <div className="absolute bottom-0 left-0 h-full bg-purple-500/50" style={{width: `${progress}%`}}></div>
-                             <p className="text-xs font-bold z-10">{t('ui.level', { level: item.level })}</p>
+                             <p className={`font-bold z-10 ${isTouchDevice ? 'text-sm' : 'text-xs'}`}>{t('ui.level', { level: item.level })}</p>
                         </button>
                     )
                 })}
@@ -252,24 +264,28 @@ const StanceButton: React.FC<{
     Icon: React.FC<{className?: string}>,
     currentStances: UnitStance[],
     onClick: () => void,
-}> = ({ stance, label, Icon, currentStances, onClick }) => {
+    isTouchDevice: boolean,
+}> = ({ stance, label, Icon, currentStances, onClick, isTouchDevice }) => {
     const isActive = currentStances.length > 0 && currentStances.every(s => s === stance);
+    const sizeClasses = isTouchDevice ? 'w-28 h-24 p-3' : 'w-24 h-20 p-2';
+    const iconClasses = isTouchDevice ? 'h-10 w-10' : 'h-8 w-8';
+    const textClasses = isTouchDevice ? 'text-sm mt-1 font-semibold' : 'text-xs mt-1 font-semibold';
 
     return (
         <button
             onClick={onClick}
             title={label}
-            className={`w-24 h-20 p-2 rounded-md flex flex-col items-center justify-center text-center transition-all duration-150 ring-1
+            className={`${sizeClasses} rounded-md flex flex-col items-center justify-center text-center transition-all duration-150 ring-1
                 ${isActive ? 'bg-sky-600/80 ring-sky-400 text-sky-300' : 'bg-slate-700/80 hover:bg-slate-600/80 ring-slate-600 text-slate-300'}`
             }
         >
-            <Icon className="h-8 w-8" />
-            <p className="text-xs mt-1 font-semibold">{label}</p>
+            <Icon className={iconClasses} />
+            <p className={textClasses}>{label}</p>
         </button>
     );
 };
 
-const StanceControlPanel: React.FC<{ units: Unit[], dispatch: React.Dispatch<Action> }> = ({ units, dispatch }) => {
+const StanceControlPanel: React.FC<{ units: Unit[], dispatch: React.Dispatch<Action>, isTouchDevice: boolean }> = ({ units, dispatch, isTouchDevice }) => {
     const { t } = useLocalization();
     const combatUnits = units.filter(u => u.unitType !== UnitType.WORKER);
     if(combatUnits.length === 0) return null;
@@ -281,30 +297,31 @@ const StanceControlPanel: React.FC<{ units: Unit[], dispatch: React.Dispatch<Act
     const currentStances = combatUnits.map(u => u.stance);
 
     return (
-        <div className="flex gap-2 p-2">
-            <StanceButton stance={UnitStance.AGGRESSIVE} label={t('stance.AGGRESSIVE')} Icon={AggressiveIcon} currentStances={currentStances} onClick={() => setStance(UnitStance.AGGRESSIVE)} />
-            <StanceButton stance={UnitStance.HOLD_GROUND} label={t('stance.HOLD_GROUND')} Icon={HoldGroundIcon} currentStances={currentStances} onClick={() => setStance(UnitStance.HOLD_GROUND)} />
+        <div className={`flex ${isTouchDevice ? 'gap-3 p-3' : 'gap-2 p-2'} flex-wrap`}>
+            <StanceButton stance={UnitStance.AGGRESSIVE} label={t('stance.AGGRESSIVE')} Icon={AggressiveIcon} currentStances={currentStances} onClick={() => setStance(UnitStance.AGGRESSIVE)} isTouchDevice={isTouchDevice} />
+            <StanceButton stance={UnitStance.HOLD_GROUND} label={t('stance.HOLD_GROUND')} Icon={HoldGroundIcon} currentStances={currentStances} onClick={() => setStance(UnitStance.HOLD_GROUND)} isTouchDevice={isTouchDevice} />
         </div>
     );
 };
 
-const WorkerActions: React.FC<{ player: Player; dispatch: React.Dispatch<Action> }> = ({ player, dispatch }) => (
-    <div className="flex gap-2 p-2 flex-wrap">
-        <BuildActionButton type={BuildingType.TOWN_HALL} player={player} dispatch={dispatch} />
-        <BuildActionButton type={BuildingType.HOUSE} player={player} dispatch={dispatch} />
-        <BuildActionButton type={BuildingType.BARRACKS} player={player} dispatch={dispatch} />
-        <BuildActionButton type={BuildingType.WAREHOUSE} player={player} dispatch={dispatch} />
-        <BuildActionButton type={BuildingType.DEFENSIVE_TOWER} player={player} dispatch={dispatch} />
-        <BuildActionButton type={BuildingType.RESEARCH_CENTER} player={player} dispatch={dispatch} />
-        <BuildActionButton type={BuildingType.MARKET} player={player} dispatch={dispatch} />
+const WorkerActions: React.FC<{ player: Player; dispatch: React.Dispatch<Action>; isTouchDevice: boolean }> = ({ player, dispatch, isTouchDevice }) => (
+    <div className={`flex flex-wrap ${isTouchDevice ? 'gap-3 p-3' : 'gap-2 p-2'}`}>
+        <BuildActionButton type={BuildingType.TOWN_HALL} player={player} dispatch={dispatch} isTouchDevice={isTouchDevice} />
+        <BuildActionButton type={BuildingType.HOUSE} player={player} dispatch={dispatch} isTouchDevice={isTouchDevice} />
+        <BuildActionButton type={BuildingType.BARRACKS} player={player} dispatch={dispatch} isTouchDevice={isTouchDevice} />
+        <BuildActionButton type={BuildingType.WAREHOUSE} player={player} dispatch={dispatch} isTouchDevice={isTouchDevice} />
+        <BuildActionButton type={BuildingType.DEFENSIVE_TOWER} player={player} dispatch={dispatch} isTouchDevice={isTouchDevice} />
+        <BuildActionButton type={BuildingType.RESEARCH_CENTER} player={player} dispatch={dispatch} isTouchDevice={isTouchDevice} />
+        <BuildActionButton type={BuildingType.MARKET} player={player} dispatch={dispatch} isTouchDevice={isTouchDevice} />
     </div>
 );
 
 const TradeActionButton: React.FC<{
     tradeType: 'buy' | 'sell',
     player: Player,
-    dispatch: React.Dispatch<Action>
-}> = ({ tradeType, player, dispatch }) => {
+    dispatch: React.Dispatch<Action>,
+    isTouchDevice: boolean,
+}> = ({ tradeType, player, dispatch, isTouchDevice }) => {
     const { t } = useLocalization();
     const isBuy = tradeType === 'buy';
     const goldCost = 20;
@@ -319,20 +336,24 @@ const TradeActionButton: React.FC<{
     const label = isBuy ? 'Buy Wood' : 'Sell Wood';
     const costLabel = isBuy ? `G:${goldCost} → W:${woodAmount}` : `W:${woodAmount} → G:${goldGain}`;
 
+    const sizeClasses = isTouchDevice ? 'w-28 h-28 p-3 gap-1' : 'w-24 h-20 p-2';
+    const textPrimary = isTouchDevice ? 'font-bold text-base' : 'font-bold text-sm';
+    const textSecondary = isTouchDevice ? 'text-sm' : 'text-xs';
+
     return (
         <button
             onClick={() => dispatch({ type: 'TRADE_RESOURCES', payload: { playerId: player.id, trade: isBuy ? 'buy_wood' : 'sell_wood' } })}
             disabled={isDisabled}
             title={title}
-            className={`w-24 h-20 p-2 rounded-md flex flex-col items-center justify-center text-center transition-all duration-150 ${!isDisabled ? 'bg-emerald-700/80 hover:bg-emerald-600/80 ring-1 ring-emerald-500' : 'bg-gray-700/80 text-gray-400 cursor-not-allowed ring-1 ring-gray-600'}`}
+            className={`${sizeClasses} rounded-md flex flex-col items-center justify-center text-center transition-all duration-150 ${!isDisabled ? 'bg-emerald-700/80 hover:bg-emerald-600/80 ring-1 ring-emerald-500' : 'bg-gray-700/80 text-gray-400 cursor-not-allowed ring-1 ring-gray-600'}`}
         >
-            <p className="font-bold text-sm">{label}</p>
-            <p className="text-xs mt-1">{costLabel}</p>
+            <p className={textPrimary}>{label}</p>
+            <p className={`${textSecondary} mt-1`}>{costLabel}</p>
         </button>
-    )
+    );
 };
 
-export const ActionPanel: React.FC<{ gameState: GameState; selectedObjects: GameObject[]; dispatch: React.Dispatch<Action> }> = ({ gameState, selectedObjects, dispatch }) => {
+export const ActionPanel: React.FC<{ gameState: GameState; selectedObjects: GameObject[]; dispatch: React.Dispatch<Action>; isTouchDevice: boolean }> = ({ gameState, selectedObjects, dispatch, isTouchDevice }) => {
     const { t } = useLocalization();
     const humanPlayer = gameState.players.find(p => p.isHuman);
 
@@ -346,7 +367,7 @@ export const ActionPanel: React.FC<{ gameState: GameState; selectedObjects: Game
         const allSameType = selectedPlayerBuildings.every(b => b.buildingType === firstBuildingType);
         
         if (allSameType && (firstBuildingType === BuildingType.BARRACKS || firstBuildingType === BuildingType.TOWN_HALL)) {
-            return <MultiBuildingActionPanel buildings={selectedPlayerBuildings} player={humanPlayer} dispatch={dispatch} />;
+            return <MultiBuildingActionPanel buildings={selectedPlayerBuildings} player={humanPlayer} dispatch={dispatch} isTouchDevice={isTouchDevice} />;
         }
     }
 
@@ -357,15 +378,15 @@ export const ActionPanel: React.FC<{ gameState: GameState; selectedObjects: Game
          const combatUnits = selectedPlayerUnits.filter(u => u.unitType !== UnitType.WORKER);
          const workerUnits = selectedPlayerUnits.filter(u => u.unitType === UnitType.WORKER);
         return (
-             <div className="flex flex-col h-full">
+            <div className="flex flex-col h-full">
                 <div className="flex-shrink-0">
-                    {combatUnits.length > 0 && <StanceControlPanel units={combatUnits} dispatch={dispatch} />}
+                    {combatUnits.length > 0 && <StanceControlPanel units={combatUnits} dispatch={dispatch} isTouchDevice={isTouchDevice} />}
                     {workerUnits.length > 0 && combatUnits.length === 0 && (
-                        <WorkerActions player={humanPlayer} dispatch={dispatch} />
+                        <WorkerActions player={humanPlayer} dispatch={dispatch} isTouchDevice={isTouchDevice} />
                     )}
                 </div>
                 <div className="flex-grow overflow-hidden">
-                    <MultiSelectPanel units={selectedPlayerUnits} dispatch={dispatch} />
+                    <MultiSelectPanel units={selectedPlayerUnits} dispatch={dispatch} isTouchFriendly={isTouchDevice} />
                 </div>
             </div>
         );
@@ -390,9 +411,9 @@ export const ActionPanel: React.FC<{ gameState: GameState; selectedObjects: Game
              const combatUnits = unit.unitType !== UnitType.WORKER ? [unit] : [];
              const workerUnits = unit.unitType === UnitType.WORKER ? [unit] : [];
             return (
-                <div className="p-2">
-                    {combatUnits.length > 0 && <StanceControlPanel units={combatUnits} dispatch={dispatch} />}
-                    {workerUnits.length > 0 && <WorkerActions player={humanPlayer} dispatch={dispatch} />}
+                <div className={isTouchDevice ? 'p-3 space-y-3' : 'p-2'}>
+                    {combatUnits.length > 0 && <StanceControlPanel units={combatUnits} dispatch={dispatch} isTouchDevice={isTouchDevice} />}
+                    {workerUnits.length > 0 && <WorkerActions player={humanPlayer} dispatch={dispatch} isTouchDevice={isTouchDevice} />}
                 </div>
             );
         case GameObjectType.BUILDING:
@@ -409,17 +430,15 @@ export const ActionPanel: React.FC<{ gameState: GameState; selectedObjects: Game
                 ];
 
                 return (
-                    <div className="p-2 flex flex-col h-full">
-                        {/* Research Buttons Container */}
-                        <div className="flex-grow grid grid-cols-2 gap-2 auto-rows-min overflow-y-auto pr-2 custom-scrollbar-vertical">
+                    <div className={`${isTouchDevice ? 'p-3' : 'p-2'} flex flex-col h-full`}>
+                        <div className={`flex-grow grid ${isTouchDevice ? 'grid-cols-1 sm:grid-cols-2 gap-3' : 'grid-cols-2 gap-2'} auto-rows-min overflow-y-auto pr-2 custom-scrollbar-vertical`}>
                             {allResearches.map(category => (
-                                <ResearchActionButton key={category} category={category} player={humanPlayer} building={building} dispatch={dispatch} />
+                                <ResearchActionButton key={category} category={category} player={humanPlayer} building={building} dispatch={dispatch} isTouchDevice={isTouchDevice} />
                             ))}
                         </div>
-                        
-                        {/* Queue Container */}
-                        <div className="flex-shrink-0 pt-2 border-t border-slate-700 mt-auto">
-                            <TrainingQueue building={building} player={humanPlayer} dispatch={dispatch} />
+
+                        <div className={`flex-shrink-0 border-t border-slate-700 mt-auto ${isTouchDevice ? 'pt-3' : 'pt-2'}`}>
+                            <TrainingQueue building={building} player={humanPlayer} dispatch={dispatch} isTouchDevice={isTouchDevice} />
                         </div>
                     </div>
                 );
@@ -427,45 +446,46 @@ export const ActionPanel: React.FC<{ gameState: GameState; selectedObjects: Game
 
             if (building.buildingType === BuildingType.MARKET) {
                 return (
-                    <div className="p-2 flex flex-col h-full">
-                        <div className="flex gap-2 items-start flex-wrap mb-2">
-                            <TradeActionButton tradeType="buy" player={humanPlayer} dispatch={dispatch} />
-                            <TradeActionButton tradeType="sell" player={humanPlayer} dispatch={dispatch} />
+                    <div className={`${isTouchDevice ? 'p-3' : 'p-2'} flex flex-col h-full`}>
+                        <div className={`flex items-start flex-wrap ${isTouchDevice ? 'gap-3 mb-3' : 'gap-2 mb-2'}`}>
+                            <TradeActionButton tradeType="buy" player={humanPlayer} dispatch={dispatch} isTouchDevice={isTouchDevice} />
+                            <TradeActionButton tradeType="sell" player={humanPlayer} dispatch={dispatch} isTouchDevice={isTouchDevice} />
                         </div>
                         <div className="flex-grow overflow-y-auto pr-2 custom-scrollbar-vertical">
-                             <ResearchActionButton category={ResearchCategory.WORKER_CAPACITY} player={humanPlayer} building={building} dispatch={dispatch} />
+                             <ResearchActionButton category={ResearchCategory.WORKER_CAPACITY} player={humanPlayer} building={building} dispatch={dispatch} isTouchDevice={isTouchDevice} />
                         </div>
-                        <div className="flex-shrink-0 pt-2 border-t border-slate-700 mt-auto">
-                            <TrainingQueue building={building} player={humanPlayer} dispatch={dispatch} />
+                        <div className={`flex-shrink-0 border-t border-slate-700 mt-auto ${isTouchDevice ? 'pt-3' : 'pt-2'}`}>
+                            <TrainingQueue building={building} player={humanPlayer} dispatch={dispatch} isTouchDevice={isTouchDevice} />
                         </div>
                     </div>
                 );
             }
 
             return (
-                <div className="p-2">
-                    <div className="flex gap-2 items-start flex-wrap">
-                        {building.buildingType === BuildingType.TOWN_HALL && 
-                            <TrainActionButton 
-                                type={UnitType.WORKER} 
+                <div className={isTouchDevice ? 'p-3 space-y-3' : 'p-2'}>
+                    <div className={`flex items-start flex-wrap ${isTouchDevice ? 'gap-3' : 'gap-2'}`}>
+                        {building.buildingType === BuildingType.TOWN_HALL &&
+                            <TrainActionButton
+                                type={UnitType.WORKER}
                                 player={humanPlayer}
-                                onClick={() => dispatch({ type: 'TRAIN_UNIT', payload: { buildingId: building.id, unitType: UnitType.WORKER } })} 
+                                onClick={() => dispatch({ type: 'TRAIN_UNIT', payload: { buildingId: building.id, unitType: UnitType.WORKER } })}
                                 isDisabled={building.constructionProgress !== undefined}
+                                isTouchDevice={isTouchDevice}
                             />
                         }
                         {building.buildingType === BuildingType.BARRACKS && (
                             <>
-                                <TrainActionButton type={UnitType.INFANTRY} player={humanPlayer} onClick={() => dispatch({ type: 'TRAIN_UNIT', payload: { buildingId: building.id, unitType: UnitType.INFANTRY }})} isDisabled={building.constructionProgress !== undefined} />
-                                <TrainActionButton type={UnitType.ARCHER} player={humanPlayer} onClick={() => dispatch({ type: 'TRAIN_UNIT', payload: { buildingId: building.id, unitType: UnitType.ARCHER }})} isDisabled={building.constructionProgress !== undefined} />
-                                <TrainActionButton type={UnitType.CAVALRY} player={humanPlayer} onClick={() => dispatch({ type: 'TRAIN_UNIT', payload: { buildingId: building.id, unitType: UnitType.CAVALRY }})} isDisabled={building.constructionProgress !== undefined} />
-                                <TrainActionButton type={UnitType.CATAPULT} player={humanPlayer} onClick={() => dispatch({ type: 'TRAIN_UNIT', payload: { buildingId: building.id, unitType: UnitType.CATAPULT }})} isDisabled={building.constructionProgress !== undefined} />
+                                <TrainActionButton type={UnitType.INFANTRY} player={humanPlayer} onClick={() => dispatch({ type: 'TRAIN_UNIT', payload: { buildingId: building.id, unitType: UnitType.INFANTRY }})} isDisabled={building.constructionProgress !== undefined} isTouchDevice={isTouchDevice} />
+                                <TrainActionButton type={UnitType.ARCHER} player={humanPlayer} onClick={() => dispatch({ type: 'TRAIN_UNIT', payload: { buildingId: building.id, unitType: UnitType.ARCHER }})} isDisabled={building.constructionProgress !== undefined} isTouchDevice={isTouchDevice} />
+                                <TrainActionButton type={UnitType.CAVALRY} player={humanPlayer} onClick={() => dispatch({ type: 'TRAIN_UNIT', payload: { buildingId: building.id, unitType: UnitType.CAVALRY }})} isDisabled={building.constructionProgress !== undefined} isTouchDevice={isTouchDevice} />
+                                <TrainActionButton type={UnitType.CATAPULT} player={humanPlayer} onClick={() => dispatch({ type: 'TRAIN_UNIT', payload: { buildingId: building.id, unitType: UnitType.CATAPULT }})} isDisabled={building.constructionProgress !== undefined} isTouchDevice={isTouchDevice} />
                             </>
                         )}
                          {building.buildingType === BuildingType.DEFENSIVE_TOWER && !building.isUpgraded && (
-                            <UpgradeTowerButton building={building} player={humanPlayer} dispatch={dispatch} />
+                            <UpgradeTowerButton building={building} player={humanPlayer} dispatch={dispatch} isTouchDevice={isTouchDevice} />
                         )}
                     </div>
-                    <TrainingQueue building={building} player={humanPlayer} dispatch={dispatch} />
+                    <TrainingQueue building={building} player={humanPlayer} dispatch={dispatch} isTouchDevice={isTouchDevice} />
                 </div>
             );
         default:
