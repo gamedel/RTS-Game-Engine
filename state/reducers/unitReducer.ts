@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { v4 as uuidv4 } from 'uuid';
 import { GameState, Action, Unit, GameObjectType, UnitType, UnitStatus, Building, ResourceNode, FloatingText, UnitStance, BuildingType, ResourceType, Vector3, ResearchCategory } from '../../types';
-import { UNIT_CONFIG, COLLISION_DATA, RESEARCH_CONFIG } from '../../constants';
+import { UNIT_CONFIG, COLLISION_DATA, RESEARCH_CONFIG, RESOURCE_NODE_INTERACTION_RADIUS } from '../../constants';
 import { NavMeshManager } from '../../hooks/utils/navMeshManager';
 
 const computeBuildingApproachPoint = (unit: Unit, building: Building, desired: Vector3): Vector3 => {
@@ -218,9 +218,9 @@ export function unitReducer(state: GameState, action: Action): GameState {
             let finalTargetPosition = targetPosition;
             if (isGatherCommand) {
                 const resource = targetObject as ResourceNode;
-                const resourceConfig = COLLISION_DATA.RESOURCES[resource.resourceType];
+                const resourceRadius = RESOURCE_NODE_INTERACTION_RADIUS[resource.resourceType] ?? 1;
                 const unitConfig = COLLISION_DATA.UNITS[unit.unitType];
-                const stoppingDistance = resourceConfig.radius + unitConfig.radius + 0.2;
+                const stoppingDistance = resourceRadius + unitConfig.radius + 0.2;
                 const numSlots = 8;
                 const resourceCenter = new THREE.Vector3(resource.position.x, 0, resource.position.z);
                 const otherWorkersAtResource = Object.values(state.units).filter(u => u.id !== unitId && u.unitType === UnitType.WORKER && (u.targetId === resource.id || u.gatherTargetId === resource.id));

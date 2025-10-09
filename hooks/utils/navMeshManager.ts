@@ -39,6 +39,8 @@ type NavState = {
   obstacles: Map<string, number[]>;
   agentPadding: number;
   maxSearchRadius: number;
+  clearanceRadiusCells: number;
+  clearanceDistance: number;
   diagnostics: {
     lastSearchMs: number;
     lastSearchExpanded: number;
@@ -51,13 +53,14 @@ type NavState = {
 
 const WORLD_SIZE = 320;
 const HALF_WORLD = WORLD_SIZE / 2;
-const CELL_SIZE = 0.5;
+const CELL_SIZE = 1;
 const SAMPLE_STEP = CELL_SIZE * 0.5;
 const MAX_QUEUE_BATCH = 48;
+const MAX_QUEUE_TIME_MS = 4;
 const EPSILON = 1e-4;
-const CLEARANCE_BUFFER = 0.35;
-const CACHE_BRIDGE_RADIUS_CELLS = 24;
-const BUILDING_EXTRA_PADDING = 0.75;
+const CLEARANCE_BUFFER = 0.45;
+const CACHE_BRIDGE_RADIUS_CELLS = 16;
+const BUILDING_EXTRA_PADDING = 1.0;
 
 const now = typeof performance !== 'undefined' ? () => performance.now() : () => Date.now();
 
@@ -71,6 +74,8 @@ const navState: NavState = {
   obstacles: new Map(),
   agentPadding: 0,
   maxSearchRadius: 0,
+  clearanceRadiusCells: 0,
+  clearanceDistance: 0,
   diagnostics: {
     lastSearchMs: 0,
     lastSearchExpanded: 0,
@@ -223,13 +228,13 @@ const isCellWalkable = (cell: Cell | null) => {
 };
 
 const canStep = (from: Cell, to: Cell) => {
-  if (!isCellWalkable(to)) return false;
+  if (!isCellTraversable(to)) return false;
   const dx = to.cx - from.cx;
   const dz = to.cz - from.cz;
   if (dx !== 0 && dz !== 0) {
     const gateA = { cx: from.cx + dx, cz: from.cz };
     const gateB = { cx: from.cx, cz: from.cz + dz };
-    if (!isCellWalkable(gateA) || !isCellWalkable(gateB)) {
+    if (!isCellTraversable(gateA) || !isCellTraversable(gateB)) {
       return false;
     }
   }
@@ -257,7 +262,22 @@ const cellHasClearance = (cell: Cell, radiusCells: number, clearance: number) =>
   return true;
 };
 
-const isWorldWalkable = (point: Vector3) => isCellWalkable(worldToCell(point.x, point.z));
+function hasRequiredClearance(cell: Cell | null): boolean {
+  if (!cell || !navState.grid) return false;
+  if (!isCellInside(cell)) return false;
+  if (navState.clearanceRadiusCells <= 0 || navState.clearanceDistance <= 0) {
+    return true;
+  }
+  return cellHasClearance(cell, navState.clearanceRadiusCells, navState.clearanceDistance);
+}
+
+function isCellTraversable(cell: Cell | null): boolean {
+  if (!cell) return false;
+  if (!isCellWalkable(cell)) return false;
+  return hasRequiredClearance(cell);
+}
+
+const isWorldWalkable = (point: Vector3) => isCellTraversable(worldToCell(point.x, point.z));
 
 const adjustCellOccupancy = (index: number, delta: number) => {
   if (!isGridReady()) return;
@@ -367,7 +387,7 @@ const findNearestWalkableCell = (start: Cell | null, maxDistance = getMaxSearchR
 
   while (queue.length) {
     const current = queue.shift()!;
-    if (isCellWalkable(current.cell)) {
+    if (isCellTraversable(current.cell)) {
       return current.cell;
     }
     if (current.distance >= maxDistance) continue;
@@ -414,15 +434,10 @@ const traverseLine = (start: Cell, end: Cell): Cell[] => {
 
 const lineIsClear = (start: Cell, end: Cell) => {
   if (!navState.grid) return false;
-  const clearance = navState.agentPadding + CLEARANCE_BUFFER;
-  const radiusCells = Math.max(1, Math.ceil(clearance / navState.grid.cellSize));
   const samples = traverseLine(start, end);
   let prev: Cell | null = null;
   for (const cell of samples) {
-    if (!isCellWalkable(cell)) {
-      return false;
-    }
-    if (!cellHasClearance(cell, radiusCells, clearance)) {
+    if (!isCellTraversable(cell)) {
       return false;
     }
     if (prev && !canStep(prev, cell)) {
@@ -943,6 +958,8 @@ export const NavMeshManager = {
     queuedRequestsByKey.clear();
     followersByKey.clear();
     navState.maxSearchRadius = 0;
+    navState.clearanceRadiusCells = 0;
+    navState.clearanceDistance = 0;
     invalidatePathCache();
     updateDiagnostics({
       lastSearchMs: 0,
@@ -988,6 +1005,11 @@ export const NavMeshManager = {
     const unitRadii = Object.values(COLLISION_DATA.UNITS).map(u => u.radius);
     const maxUnitRadius = unitRadii.length ? Math.max(...unitRadii) : 0.5;
     navState.agentPadding = maxUnitRadius + 0.35;
+    navState.clearanceDistance = navState.agentPadding + CLEARANCE_BUFFER;
+    navState.clearanceRadiusCells = Math.max(
+      1,
+      Math.ceil(navState.clearanceDistance / navState.grid.cellSize)
+    );
 
     rebuildStaticObstacles(buildings, resources);
     navState.ready = true;
@@ -1076,9 +1098,13 @@ export const NavMeshManager = {
   processQueue() {
     if (!navState.ready) return;
     updateDiagnostics({ queueDepth: requestQueue.length, pending: pendingRequests.size });
+    const frameStart = now();
     for (let i = 0; i < MAX_QUEUE_BATCH; i++) {
       if (!requestQueue.length) break;
       processNextRequest();
+      if (now() - frameStart >= MAX_QUEUE_TIME_MS) {
+        break;
+      }
     }
   },
 
@@ -1094,6 +1120,8 @@ export const NavMeshManager = {
     pendingRequests.clear();
     queuedRequestsByKey.clear();
     followersByKey.clear();
+    navState.clearanceRadiusCells = 0;
+    navState.clearanceDistance = 0;
     invalidatePathCache();
     updateDiagnostics({
       lastSearchMs: 0,

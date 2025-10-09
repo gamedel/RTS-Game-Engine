@@ -59,10 +59,6 @@ export const COLLISION_DATA = {
         [BuildingType.RESEARCH_CENTER]: { width: 4, depth: 4 },
         [BuildingType.MARKET]: { width: 3.5, depth: 3.5 },
     },
-    RESOURCES: {
-        [ResourceType.TREE]: { radius: 1.2 },
-        [ResourceType.GOLD_MINE]: { radius: 1.2 },
-    },
     UNITS: {
         [UnitType.WORKER]: { radius: 0.4 },
         [UnitType.INFANTRY]: { radius: 0.5 },
@@ -70,6 +66,11 @@ export const COLLISION_DATA = {
         [UnitType.CAVALRY]: { radius: 0.7 },
         [UnitType.CATAPULT]: { radius: 0.8 },
     }
+};
+
+export const RESOURCE_NODE_INTERACTION_RADIUS: Record<ResourceType, number> = {
+  [ResourceType.TREE]: 1.1,
+  [ResourceType.GOLD_MINE]: 1.25,
 };
 
 export const COMMAND_MARKER_DURATION = 750; // ms
