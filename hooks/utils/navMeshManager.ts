@@ -38,8 +38,11 @@ const WORLD_SIZE = 320;
 const HALF_WORLD = WORLD_SIZE / 2;
 const CELL_SIZE = 0.5;
 const SAMPLE_STEP = CELL_SIZE * 0.5;
-const MAX_QUEUE_BATCH = 24;
+const MAX_QUEUE_BATCH = 48;
 const EPSILON = 1e-4;
+const CLEARANCE_BUFFER = 0.35;
+const CACHE_BRIDGE_RADIUS_CELLS = 24;
+const BUILDING_EXTRA_PADDING = 0.75;
 
 const now = typeof performance !== 'undefined' ? () => performance.now() : () => Date.now();
 
@@ -202,6 +205,41 @@ const isCellWalkable = (cell: Cell | null) => {
   return idx >= 0 ? navState.occupancy[idx] === 0 : false;
 };
 
+const canStep = (from: Cell, to: Cell) => {
+  if (!isCellWalkable(to)) return false;
+  const dx = to.cx - from.cx;
+  const dz = to.cz - from.cz;
+  if (dx !== 0 && dz !== 0) {
+    const gateA = { cx: from.cx + dx, cz: from.cz };
+    const gateB = { cx: from.cx, cz: from.cz + dz };
+    if (!isCellWalkable(gateA) || !isCellWalkable(gateB)) {
+      return false;
+    }
+  }
+  return true;
+};
+
+const cellHasClearance = (cell: Cell, radiusCells: number, clearance: number) => {
+  if (!navState.grid) return false;
+  const { cellSize } = navState.grid;
+  for (let dz = -radiusCells; dz <= radiusCells; dz++) {
+    for (let dx = -radiusCells; dx <= radiusCells; dx++) {
+      const neighbor = { cx: cell.cx + dx, cz: cell.cz + dz };
+      if (!isCellInside(neighbor)) {
+        return false;
+      }
+      const distance = Math.hypot(dx * cellSize, dz * cellSize);
+      if (distance - cellSize * 0.5 > clearance) {
+        continue;
+      }
+      if (!isCellWalkable(neighbor)) {
+        return false;
+      }
+    }
+  }
+  return true;
+};
+
 const isWorldWalkable = (point: Vector3) => isCellWalkable(worldToCell(point.x, point.z));
 
 const adjustCellOccupancy = (index: number, delta: number) => {
@@ -259,7 +297,7 @@ const registerBuildingObstacle = (building: Building) => {
   if (building.constructionProgress !== undefined) return;
   const size = COLLISION_DATA.BUILDINGS[building.buildingType];
   if (!size) return;
-  const pad = navState.agentPadding;
+  const pad = navState.agentPadding + BUILDING_EXTRA_PADDING;
   const halfWidth = size.width / 2 + pad;
   const halfDepth = size.depth / 2 + pad;
   const minX = building.position.x - halfWidth;
@@ -358,11 +396,22 @@ const traverseLine = (start: Cell, end: Cell): Cell[] => {
 };
 
 const lineIsClear = (start: Cell, end: Cell) => {
+  if (!navState.grid) return false;
+  const clearance = navState.agentPadding + CLEARANCE_BUFFER;
+  const radiusCells = Math.max(1, Math.ceil(clearance / navState.grid.cellSize));
   const samples = traverseLine(start, end);
+  let prev: Cell | null = null;
   for (const cell of samples) {
     if (!isCellWalkable(cell)) {
       return false;
     }
+    if (!cellHasClearance(cell, radiusCells, clearance)) {
+      return false;
+    }
+    if (prev && !canStep(prev, cell)) {
+      return false;
+    }
+    prev = cell;
   }
   return true;
 };
@@ -391,6 +440,64 @@ const storePathInCache = (start: Cell, goal: Cell, solution: PathSolution) => {
   pruneCache();
 };
 
+const bridgeCachedPath = (start: Cell, cached: CachedPath): PathSolution | null => {
+  if (!isGridReady()) return null;
+  const startKey = encodeCell(start);
+  const targetIndices = new Map<string, number>();
+  cached.cells.forEach((cell, index) => {
+    targetIndices.set(encodeCell(cell), index);
+  });
+
+  const queue: Cell[] = [start];
+  const parents = new Map<string, string>();
+  const cellsByKey = new Map<string, Cell>([[startKey, start]]);
+  const distances = new Map<string, number>([[startKey, 0]]);
+  const visited = new Set<string>([startKey]);
+
+  while (queue.length) {
+    const current = queue.shift()!;
+    const currentKey = encodeCell(current);
+    const distance = distances.get(currentKey) ?? 0;
+
+    const hitIndex = targetIndices.get(currentKey);
+    if (hitIndex !== undefined) {
+      const prefix: Cell[] = [];
+      let key: string | undefined = currentKey;
+      while (key) {
+        const cell = cellsByKey.get(key);
+        if (!cell) break;
+        prefix.push(cell);
+        if (key === startKey) break;
+        key = parents.get(key);
+      }
+      prefix.reverse();
+
+      const remainder = cached.cells.slice(hitIndex);
+      const prefixTrimmed = prefix.length ? prefix.slice(0, -1) : [];
+      const cells = prefixTrimmed.length ? [...prefixTrimmed, ...remainder] : remainder;
+      if (!cells.length) return null;
+      return { cells, reachedGoal: cached.reachedGoal, expanded: visited.size, elapsedMs: 0 };
+    }
+
+    if (distance >= CACHE_BRIDGE_RADIUS_CELLS) {
+      continue;
+    }
+
+    for (const neighbor of getNeighbors(current)) {
+      if (!canStep(current, neighbor)) continue;
+      const key = encodeCell(neighbor);
+      if (visited.has(key)) continue;
+      visited.add(key);
+      parents.set(key, currentKey);
+      cellsByKey.set(key, neighbor);
+      distances.set(key, distance + 1);
+      queue.push(neighbor);
+    }
+  }
+
+  return null;
+};
+
 const reuseCachedPath = (start: Cell, goal: Cell): PathSolution | null => {
   const key = cacheKeyFor(start, goal);
   const cached = pathCache.get(key);
@@ -415,6 +522,12 @@ const reuseCachedPath = (start: Cell, goal: Cell): PathSolution | null => {
     }
     cached.timestamp = now();
     return { cells, reachedGoal: cached.reachedGoal, expanded: 0, elapsedMs: 0 };
+  }
+
+  const bridged = bridgeCachedPath(start, cached);
+  if (bridged) {
+    cached.timestamp = now();
+    return bridged;
   }
 
   return null;
@@ -510,21 +623,14 @@ const solvePath = (start: Cell, goal: Cell): PathSolution => {
     }
 
     for (const neighbor of getNeighbors(current.cell)) {
+      if (!canStep(current.cell, neighbor)) continue;
       const neighborIdx = indexForCell(neighbor);
       if (neighborIdx < 0) continue;
       if (closed.has(neighborIdx)) continue;
-      if (!isCellWalkable(neighbor)) continue;
 
       const dx = neighbor.cx - current.cell.cx;
       const dz = neighbor.cz - current.cell.cz;
       const diagonal = dx !== 0 && dz !== 0;
-      if (diagonal) {
-        const gateA = { cx: current.cell.cx + dx, cz: current.cell.cz };
-        const gateB = { cx: current.cell.cx, cz: current.cell.cz + dz };
-        if (!isCellWalkable(gateA) || !isCellWalkable(gateB)) {
-          continue;
-        }
-      }
 
       const stepCost = diagonal ? Math.SQRT2 : 1;
       const tentativeG = current.g + stepCost;
@@ -786,7 +892,7 @@ export const NavMeshManager = {
 
     const unitRadii = Object.values(COLLISION_DATA.UNITS).map(u => u.radius);
     const maxUnitRadius = unitRadii.length ? Math.max(...unitRadii) : 0.5;
-    navState.agentPadding = maxUnitRadius + 0.25;
+    navState.agentPadding = maxUnitRadius + 0.35;
 
     rebuildStaticObstacles(buildings, resources);
     navState.ready = true;
