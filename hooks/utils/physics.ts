@@ -52,30 +52,34 @@ export function getDepenetrationVector(unit: Unit, building: Building): { x: num
 }
 
 export function getSeparationVector(unit: Unit, otherUnits: Unit[]): THREE.Vector3 {
-    const separationVector = new THREE.Vector3();
-    let neighbors = 0;
-    const desiredSeparation = (COLLISION_DATA.UNITS[unit.unitType].radius * 2) + 0.5;
+  const separationVector = new THREE.Vector3();
+  let neighbors = 0;
+  const desiredSeparation = (COLLISION_DATA.UNITS[unit.unitType].radius * 2) + 0.5;
+  const desiredSq = desiredSeparation * desiredSeparation;
 
-    const unitPos = new THREE.Vector3(unit.position.x, 0, unit.position.z);
+  const ux = unit.position.x;
+  const uz = unit.position.z;
 
-    for (const other of otherUnits) {
-        if (unit.id === other.id) continue;
+  for (const other of otherUnits) {
+    if (!other || unit.id === other.id) continue;
 
-        const otherPos = new THREE.Vector3(other.position.x, 0, other.position.z);
-        const distance = unitPos.distanceTo(otherPos);
+    const dx = ux - other.position.x;
+    const dz = uz - other.position.z;
+    const distSq = dx * dx + dz * dz;
+    if (distSq <= 0 || distSq >= desiredSq) continue;
 
-        if (distance > 0 && distance < desiredSeparation) {
-            const diff = new THREE.Vector3().subVectors(unitPos, otherPos);
-            diff.normalize();
-            diff.divideScalar(distance); // weight by distance
-            separationVector.add(diff);
-            neighbors++;
-        }
-    }
+    const dist = Math.sqrt(distSq);
+    if (dist <= 0) continue;
 
-    if (neighbors > 0) {
-        separationVector.divideScalar(neighbors);
-    }
-    
-    return separationVector;
+    const inv = 1 / dist;
+    separationVector.x += dx * inv;
+    separationVector.z += dz * inv;
+    neighbors++;
+  }
+
+  if (neighbors > 0) {
+    separationVector.multiplyScalar(1 / neighbors);
+  }
+
+  return separationVector;
 }

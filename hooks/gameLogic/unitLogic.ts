@@ -360,16 +360,43 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
             }
         }
 
+        const nearbyUnitIds = unitGrid.queryNeighbors(unit.position.x, unit.position.z);
+        if (nearbyUnitIds.length > 1) {
+            const neighbors: Unit[] = [];
+            for (const neighborId of nearbyUnitIds) {
+                if (neighborId === unit.id) continue;
+                const neighbor = units[neighborId];
+                if (!neighbor || neighbor.isDying) continue;
+                neighbors.push(neighbor);
+            }
+
+            if (neighbors.length) {
+                const separation = getSeparationVector(unit, neighbors);
+                if (separation.lengthSq() > 1e-6) {
+                    const maxPush = UNIT_CONFIG[unit.unitType].speed * delta * 0.6;
+                    const separationLength = separation.length();
+                    separation.setLength(Math.min(maxPush, separationLength));
+                    totalPushX += separation.x;
+                    totalPushZ += separation.z;
+                }
+            }
+        }
+
         if (totalPushX !== 0 || totalPushZ !== 0) {
+            const projected = NavMeshManager.projectMove(
+                unit.position,
+                {
+                    x: unit.position.x + totalPushX,
+                    y: unit.position.y,
+                    z: unit.position.z + totalPushZ,
+                }
+            );
+
             dispatch({
                 type: 'UPDATE_UNIT',
                 payload: {
                     id: unit.id,
-                    position: {
-                        x: unit.position.x + totalPushX,
-                        y: unit.position.y,
-                        z: unit.position.z + totalPushZ,
-                    },
+                    position: projected,
                 }
             });
         }
