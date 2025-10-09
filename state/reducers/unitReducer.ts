@@ -15,8 +15,8 @@ const computeBuildingApproachPoint = (unit: Unit, building: Building, desired: V
     const center = building.position;
     const halfWidth = buildingCollision.width / 2;
     const halfDepth = buildingCollision.depth / 2;
-    const clearance = unitCollision.radius + 0.75;
-    const cornerPadding = clearance * 0.85;
+    const clearance = unitCollision.radius + 1.1;
+    const cornerPadding = clearance;
 
     let dirX = desired.x - center.x;
     let dirZ = desired.z - center.z;
@@ -93,7 +93,7 @@ const computeBuildingApproachPoint = (unit: Unit, building: Building, desired: V
             z: center.z + candidate.z * offset,
         };
 
-        const snapped = NavMeshManager.safeSnap(rawPoint, offset + clearance);
+        const snapped = NavMeshManager.safeSnap(rawPoint, offset + clearance + 0.5);
         const toDesired = Math.hypot(snapped.x - desired.x, snapped.z - desired.z);
         const snapDelta = Math.hypot(snapped.x - rawPoint.x, snapped.z - rawPoint.z);
         const toUnit = Math.hypot(snapped.x - unit.position.x, snapped.z - unit.position.z);
