@@ -2,7 +2,7 @@ import { Unit, Building } from '../../types';
 import { COLLISION_DATA, getBuildingCollisionMask } from '../../constants';
 import * as THREE from 'three';
 
-const BUILDING_DEPENETRATION_PADDING = 0.45;
+const BUILDING_DEPENETRATION_PADDING = 0.25;
 const MIN_PUSH_EPSILON = 0.18;
 
 export function getDepenetrationVector(unit: Unit, building: Building): { x: number, z: number } | null {
