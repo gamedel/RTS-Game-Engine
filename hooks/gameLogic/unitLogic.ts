@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { GameState, Action, UnitStatus, ResourceType, UnitType, Unit, GameObjectType, UnitStance, BuildingType, Building, ResourceNode, Vector3, ResearchCategory, FloatingText } from '../../types';
-import { UNIT_CONFIG, COLLISION_DATA, BUILDING_CONFIG, REPAIR_TICK_TIME, REPAIR_HP_PER_TICK, RESEARCH_CONFIG, getAttackBonus, getDefenseBonus, DEATH_ANIMATION_DURATION, arePlayersHostile } from '../../constants';
+import { UNIT_CONFIG, COLLISION_DATA, BUILDING_CONFIG, REPAIR_TICK_TIME, REPAIR_HP_PER_TICK, RESEARCH_CONFIG, getAttackBonus, getDefenseBonus, DEATH_ANIMATION_DURATION, arePlayersHostile, getBuildingCollisionMask } from '../../constants';
 import { v4 as uuidv4 } from 'uuid';
 import { BufferedDispatch } from '../../state/batch';
 import { NavMeshManager } from '../utils/navMeshManager';
@@ -273,7 +273,7 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                 const dx = unit.position.x - building.position.x;
                 const dz = unit.position.z - building.position.z;
                 const distanceSq = dx * dx + dz * dz;
-                const buildingSize = COLLISION_DATA.BUILDINGS[building.buildingType];
+                const buildingSize = getBuildingCollisionMask(building.buildingType);
                 const buildingRadius = Math.max(buildingSize.width, buildingSize.depth) / 2;
                 const workerInteractionRange = UNIT_CONFIG[UnitType.WORKER].attackRange;
                 const requiredDistance = buildingRadius + workerInteractionRange;
@@ -313,7 +313,7 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                 const dx = unit.position.x - building.position.x;
                 const dz = unit.position.z - building.position.z;
                 const distanceSq = dx * dx + dz * dz;
-                const buildingSize = COLLISION_DATA.BUILDINGS[building.buildingType];
+                const buildingSize = getBuildingCollisionMask(building.buildingType);
                 const buildingRadius = Math.max(buildingSize.width, buildingSize.depth) / 2;
                 const workerInteractionRange = UNIT_CONFIG[UnitType.WORKER].attackRange;
                 const requiredDistance = buildingRadius + workerInteractionRange;

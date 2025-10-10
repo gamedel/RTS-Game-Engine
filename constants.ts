@@ -68,6 +68,20 @@ export const COLLISION_DATA = {
     }
 };
 
+export const BUILDING_COLLISION_MASK_SCALE = 0.65;
+
+export const getBuildingCollisionMask = (buildingType: BuildingType) => {
+    const base = COLLISION_DATA.BUILDINGS[buildingType];
+    if (!base) {
+        return { width: 0, depth: 0 };
+    }
+
+    return {
+        width: base.width * BUILDING_COLLISION_MASK_SCALE,
+        depth: base.depth * BUILDING_COLLISION_MASK_SCALE,
+    };
+};
+
 export const RESOURCE_NODE_INTERACTION_RADIUS: Record<ResourceType, number> = {
   [ResourceType.TREE]: 1.1,
   [ResourceType.GOLD_MINE]: 1.25,

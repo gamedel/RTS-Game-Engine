@@ -1,21 +1,21 @@
 import * as THREE from 'three';
 import { v4 as uuidv4 } from 'uuid';
 import { GameState, Action, Unit, GameObjectType, UnitType, UnitStatus, Building, ResourceNode, FloatingText, UnitStance, BuildingType, ResourceType, Vector3, ResearchCategory } from '../../types';
-import { UNIT_CONFIG, COLLISION_DATA, RESEARCH_CONFIG, RESOURCE_NODE_INTERACTION_RADIUS } from '../../constants';
+import { UNIT_CONFIG, COLLISION_DATA, RESEARCH_CONFIG, RESOURCE_NODE_INTERACTION_RADIUS, getBuildingCollisionMask } from '../../constants';
 import { NavMeshManager } from '../../hooks/utils/navMeshManager';
 
 const computeBuildingApproachPoint = (unit: Unit, building: Building, desired: Vector3): Vector3 => {
-    const buildingCollision = COLLISION_DATA.BUILDINGS[building.buildingType];
+    const buildingCollision = getBuildingCollisionMask(building.buildingType);
     const unitCollision = COLLISION_DATA.UNITS[unit.unitType];
 
-    if (!buildingCollision || !unitCollision) {
+    if (!buildingCollision || !unitCollision || buildingCollision.width <= 0 || buildingCollision.depth <= 0) {
         return NavMeshManager.safeSnap(desired, 4);
     }
 
     const center = building.position;
     const halfWidth = buildingCollision.width / 2;
     const halfDepth = buildingCollision.depth / 2;
-    const clearance = unitCollision.radius + 1.1;
+    const clearance = unitCollision.radius + 0.45;
     const cornerPadding = clearance;
 
     let dirX = desired.x - center.x;
@@ -259,6 +259,7 @@ export function unitReducer(state: GameState, action: Action): GameState {
                 status: UnitStatus.MOVING,
                 pathTarget: finalTargetPosition,
                 targetId,
+                gatherTargetId: isGatherCommand ? targetId : undefined,
                 finalDestination: newFinalDestination,
                 buildTask: undefined,
                 repairTask: undefined,

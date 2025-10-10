@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { GameState, UnitStatus, Unit, GameObjectType, UnitStance, Building, FloatingText, UnitType } from '../../types';
-import { UNIT_CONFIG, arePlayersHostile, getAttackBonus, getDefenseBonus, COLLISION_DATA } from '../../constants';
+import { UNIT_CONFIG, arePlayersHostile, getAttackBonus, getDefenseBonus, getBuildingCollisionMask } from '../../constants';
 import { v4 as uuidv4 } from 'uuid';
 import { BufferedDispatch } from '../../state/batch';
 
@@ -61,7 +61,7 @@ export const processCombatLogic = (state: GameState, delta: number, dispatch: Bu
             
             let effectiveAttackRange = unit.attackRange;
             if (target.type === GameObjectType.BUILDING) {
-                const buildingSize = COLLISION_DATA.BUILDINGS[target.buildingType];
+                const buildingSize = getBuildingCollisionMask(target.buildingType);
                 // Use half of the largest dimension as a pseudo-radius
                 const buildingRadius = Math.max(buildingSize.width, buildingSize.depth) / 2;
                 effectiveAttackRange += buildingRadius;

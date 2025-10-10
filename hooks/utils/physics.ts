@@ -1,16 +1,20 @@
 import { Unit, Building } from '../../types';
-import { COLLISION_DATA } from '../../constants';
+import { COLLISION_DATA, getBuildingCollisionMask } from '../../constants';
 import * as THREE from 'three';
 
-const BUILDING_DEPENETRATION_PADDING = 1.1;
-const MIN_PUSH_EPSILON = 0.12;
+const BUILDING_DEPENETRATION_PADDING = 0.45;
+const MIN_PUSH_EPSILON = 0.18;
 
 export function getDepenetrationVector(unit: Unit, building: Building): { x: number, z: number } | null {
     const unitRadius = COLLISION_DATA.UNITS[unit.unitType].radius;
-    const buildingSize = COLLISION_DATA.BUILDINGS[building.buildingType];
+    const buildingSize = getBuildingCollisionMask(building.buildingType);
 
     const halfWidth = buildingSize.width / 2;
     const halfDepth = buildingSize.depth / 2;
+
+    if (halfWidth <= 0 || halfDepth <= 0) {
+        return null;
+    }
     const clearanceX = halfWidth + unitRadius + BUILDING_DEPENETRATION_PADDING;
     const clearanceZ = halfDepth + unitRadius + BUILDING_DEPENETRATION_PADDING;
 
