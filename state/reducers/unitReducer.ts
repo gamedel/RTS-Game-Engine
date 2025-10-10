@@ -1,7 +1,124 @@
 import * as THREE from 'three';
 import { v4 as uuidv4 } from 'uuid';
 import { GameState, Action, Unit, GameObjectType, UnitType, UnitStatus, Building, ResourceNode, FloatingText, UnitStance, BuildingType, ResourceType, Vector3, ResearchCategory } from '../../types';
-import { UNIT_CONFIG, COLLISION_DATA, RESEARCH_CONFIG } from '../../constants';
+import { UNIT_CONFIG, COLLISION_DATA, RESEARCH_CONFIG, RESOURCE_NODE_INTERACTION_RADIUS } from '../../constants';
+import { NavMeshManager } from '../../hooks/utils/navMeshManager';
+
+const computeBuildingApproachPoint = (unit: Unit, building: Building, desired: Vector3): Vector3 => {
+    const buildingCollision = COLLISION_DATA.BUILDINGS[building.buildingType];
+    const unitCollision = COLLISION_DATA.UNITS[unit.unitType];
+
+    if (!buildingCollision || !unitCollision) {
+        return NavMeshManager.safeSnap(desired, 4);
+    }
+
+    const center = building.position;
+    const halfWidth = buildingCollision.width / 2;
+    const halfDepth = buildingCollision.depth / 2;
+    const clearance = unitCollision.radius + 1.1;
+    const cornerPadding = clearance;
+
+    let dirX = desired.x - center.x;
+    let dirZ = desired.z - center.z;
+    let dirLength = Math.hypot(dirX, dirZ);
+
+    if (dirLength < 1e-3) {
+        dirX = unit.position.x - center.x;
+        dirZ = unit.position.z - center.z;
+        dirLength = Math.hypot(dirX, dirZ);
+        if (dirLength < 1e-3) {
+            dirX = 1;
+            dirZ = 0;
+            dirLength = 1;
+        }
+    }
+
+    const normalize = (x: number, z: number) => {
+        const length = Math.hypot(x, z);
+        if (length < 1e-3) {
+            return { x: 0, z: 0 };
+        }
+        return { x: x / length, z: z / length };
+    };
+
+    type DirectionCandidate = { x: number; z: number; bias: number };
+    const candidates: DirectionCandidate[] = [];
+    const seen = new Set<string>();
+    const pushCandidate = (x: number, z: number, bias: number) => {
+        if (!isFinite(x) || !isFinite(z)) return;
+        const norm = normalize(x, z);
+        if (Math.abs(norm.x) < 1e-3 && Math.abs(norm.z) < 1e-3) return;
+        const key = `${norm.x.toFixed(3)}|${norm.z.toFixed(3)}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        candidates.push({ x: norm.x, z: norm.z, bias });
+    };
+
+    pushCandidate(dirX, dirZ, 0);
+    pushCandidate(Math.sign(dirX), 0, 0.35);
+    pushCandidate(0, Math.sign(dirZ), 0.35);
+
+    if (Math.abs(dirX) > 1e-3 && Math.abs(dirZ) > 1e-3) {
+        pushCandidate(Math.sign(dirX), Math.sign(dirZ), 0.25);
+    }
+
+    // Always consider the four main faces for stability
+    pushCandidate(1, 0, 0.6);
+    pushCandidate(-1, 0, 0.6);
+    pushCandidate(0, 1, 0.6);
+    pushCandidate(0, -1, 0.6);
+
+    let bestPoint: Vector3 | null = null;
+    let bestScore = Number.POSITIVE_INFINITY;
+
+    for (const candidate of candidates) {
+        const edgeDistance = Math.min(
+            candidate.x === 0 ? Number.POSITIVE_INFINITY : halfWidth / Math.abs(candidate.x),
+            candidate.z === 0 ? Number.POSITIVE_INFINITY : halfDepth / Math.abs(candidate.z)
+        );
+        if (!isFinite(edgeDistance)) {
+            continue;
+        }
+
+        let offset = edgeDistance + clearance;
+        if (Math.abs(candidate.x) > 0.5 && Math.abs(candidate.z) > 0.5) {
+            offset += cornerPadding;
+        } else {
+            offset += clearance * 0.25;
+        }
+
+        const rawPoint = {
+            x: center.x + candidate.x * offset,
+            y: 0,
+            z: center.z + candidate.z * offset,
+        };
+
+        const snapped = NavMeshManager.safeSnap(rawPoint, offset + clearance + 0.5);
+        const toDesired = Math.hypot(snapped.x - desired.x, snapped.z - desired.z);
+        const snapDelta = Math.hypot(snapped.x - rawPoint.x, snapped.z - rawPoint.z);
+        const toUnit = Math.hypot(snapped.x - unit.position.x, snapped.z - unit.position.z);
+        const reachTest = NavMeshManager.projectMove(snapped, desired);
+        const reachError = Math.hypot(reachTest.x - desired.x, reachTest.z - desired.z);
+
+        const score =
+            toDesired +
+            candidate.bias * 2 +
+            snapDelta * 1.5 +
+            reachError * 3 +
+            toUnit * 0.05;
+
+        if (score < bestScore) {
+            bestScore = score;
+            bestPoint = snapped;
+        }
+    }
+
+    if (bestPoint) {
+        return bestPoint;
+    }
+
+    return NavMeshManager.safeSnap(desired, clearance + 4);
+};
 
 export function unitReducer(state: GameState, action: Action): GameState {
     switch (action.type) {
@@ -25,7 +142,7 @@ export function unitReducer(state: GameState, action: Action): GameState {
             };
             
             if (unit.status === UnitStatus.FLEEING && targetObject?.type === GameObjectType.BUILDING) {
-                 return { ...state, units: { ...state.units, [unitId]: { ...unit, targetPosition: targetPosition, targetId: targetId, path: undefined, pathIndex: undefined, pathTarget: undefined } }};
+                return { ...state, units: { ...state.units, [unitId]: { ...unit, targetPosition: targetPosition, targetId: targetId, path: undefined, pathIndex: undefined, pathTarget: undefined } }};
             }
 
             const isWorkerRepairing =
@@ -53,19 +170,57 @@ export function unitReducer(state: GameState, action: Action): GameState {
 
 
             if (isWorkerRepairing) {
-                 return { ...state, units: { ...state.units, [unitId]: { ...unit, ...taskAssignment, status: UnitStatus.MOVING, pathTarget: targetPosition, targetId: targetId, repairTask: { buildingId: targetId! }, buildTask: undefined, resourcePayload: undefined, finalDestination: newFinalDestination, path: undefined, pathIndex: undefined, targetPosition: undefined } } };
+                const approachPosition = computeBuildingApproachPoint(unit, targetObject as Building, targetPosition);
+                return {
+                    ...state,
+                    units: {
+                        ...state.units,
+                        [unitId]: {
+                            ...unit,
+                            ...taskAssignment,
+                            status: UnitStatus.MOVING,
+                            pathTarget: approachPosition,
+                            targetId: targetId,
+                            repairTask: { buildingId: targetId! },
+                            buildTask: undefined,
+                            resourcePayload: undefined,
+                            finalDestination: newFinalDestination,
+                            path: undefined,
+                            pathIndex: undefined,
+                            targetPosition: undefined,
+                        },
+                    },
+                };
             }
             if (isWorkerConstructing) {
                 const building = targetObject as Building;
-                return { ...state, units: { ...state.units, [unitId]: { ...unit, ...taskAssignment, status: UnitStatus.MOVING, pathTarget: building.position, targetId: building.id, buildTask: { buildingId: building.id, position: building.position }, finalDestination: newFinalDestination, path: undefined, pathIndex: undefined, targetPosition: undefined } } };
+                const approachPosition = computeBuildingApproachPoint(unit, building, targetPosition ?? building.position);
+                return {
+                    ...state,
+                    units: {
+                        ...state.units,
+                        [unitId]: {
+                            ...unit,
+                            ...taskAssignment,
+                            status: UnitStatus.MOVING,
+                            pathTarget: approachPosition,
+                            targetId: building.id,
+                            buildTask: { buildingId: building.id, position: building.position },
+                            finalDestination: newFinalDestination,
+                            path: undefined,
+                            pathIndex: undefined,
+                            targetPosition: undefined,
+                        },
+                    },
+                };
             }
 
             let finalTargetPosition = targetPosition;
             if (isGatherCommand) {
                 const resource = targetObject as ResourceNode;
-                const resourceConfig = COLLISION_DATA.RESOURCES[resource.resourceType];
+                const resourceRadius = RESOURCE_NODE_INTERACTION_RADIUS[resource.resourceType] ?? 1;
                 const unitConfig = COLLISION_DATA.UNITS[unit.unitType];
-                const stoppingDistance = resourceConfig.radius + unitConfig.radius + 0.2;
+                const stoppingDistance = resourceRadius + unitConfig.radius + 0.2;
                 const numSlots = 8;
                 const resourceCenter = new THREE.Vector3(resource.position.x, 0, resource.position.z);
                 const otherWorkersAtResource = Object.values(state.units).filter(u => u.id !== unitId && u.unitType === UnitType.WORKER && (u.targetId === resource.id || u.gatherTargetId === resource.id));
@@ -88,6 +243,14 @@ export function unitReducer(state: GameState, action: Action): GameState {
                     }
                 }
                 finalTargetPosition = bestSlot ? { x: bestSlot.x, y: 0, z: bestSlot.z } : finalTargetPosition;
+            }
+
+            if (targetObject?.type === GameObjectType.BUILDING) {
+                finalTargetPosition = computeBuildingApproachPoint(
+                    unit,
+                    targetObject as Building,
+                    finalTargetPosition ?? targetObject.position
+                );
             }
 
             const updatedUnit: Unit = {
