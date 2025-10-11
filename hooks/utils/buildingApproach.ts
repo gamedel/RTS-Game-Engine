@@ -11,16 +11,29 @@ const normalize = (x: number, z: number) => {
 };
 
 export const computeBuildingApproachPoint = (unit: Unit, building: Building, desired: Vector3): Vector3 => {
-    const buildingCollision = getBuildingCollisionMask(building.buildingType);
+    const buildingMask = getBuildingCollisionMask(building.buildingType);
+    const fallbackCollision = COLLISION_DATA.BUILDINGS[building.buildingType];
     const unitCollision = COLLISION_DATA.UNITS[unit.unitType];
 
-    if (!buildingCollision || !unitCollision || buildingCollision.width <= 0 || buildingCollision.depth <= 0) {
+    if (!unitCollision) {
+        return NavMeshManager.safeSnap(desired, 4);
+    }
+
+    const maskWidth = buildingMask?.width ?? 0;
+    const maskDepth = buildingMask?.depth ?? 0;
+    const fallbackWidth = fallbackCollision?.width ?? maskWidth;
+    const fallbackDepth = fallbackCollision?.depth ?? maskDepth;
+
+    const navHalfWidth = (maskWidth > 0 ? maskWidth : fallbackWidth) / 2;
+    const navHalfDepth = (maskDepth > 0 ? maskDepth : fallbackDepth) / 2;
+    const physicalHalfWidth = (fallbackWidth > 0 ? fallbackWidth : maskWidth) / 2;
+    const physicalHalfDepth = (fallbackDepth > 0 ? fallbackDepth : maskDepth) / 2;
+
+    if (navHalfWidth <= 0 || navHalfDepth <= 0) {
         return NavMeshManager.safeSnap(desired, 4);
     }
 
     const center = building.position;
-    const halfWidth = buildingCollision.width / 2;
-    const halfDepth = buildingCollision.depth / 2;
     let clearance = unitCollision.radius + 0.35;
     if (building.buildingType === BuildingType.TOWN_HALL) {
         clearance = unitCollision.radius + 0.32;
@@ -72,13 +85,57 @@ export const computeBuildingApproachPoint = (unit: Unit, building: Building, des
     pushCandidate(0, 1, 0.6);
     pushCandidate(0, -1, 0.6);
 
+    const isPointInsidePhysical = (point: Vector3) => {
+        const epsilon = 0.05;
+        return (
+            Math.abs(point.x - center.x) <= physicalHalfWidth - epsilon &&
+            Math.abs(point.z - center.z) <= physicalHalfDepth - epsilon
+        );
+    };
+
+    const distanceToPhysicalBoundary = (x: number, z: number) => {
+        const absX = Math.abs(x);
+        const absZ = Math.abs(z);
+        const alongX = absX > 1e-3 ? physicalHalfWidth / absX : Number.POSITIVE_INFINITY;
+        const alongZ = absZ > 1e-3 ? physicalHalfDepth / absZ : Number.POSITIVE_INFINITY;
+        const boundary = Math.min(alongX, alongZ);
+        return Number.isFinite(boundary) ? boundary : Math.max(physicalHalfWidth, physicalHalfDepth);
+    };
+
+    const ensureOutside = (point: Vector3, dir: DirectionCandidate): Vector3 => {
+        const baseDir = normalize(dir.x, dir.z);
+        const boundary = distanceToPhysicalBoundary(baseDir.x, baseDir.z);
+        const baseDistance = boundary + clearance + 0.05;
+        const currentDistance = Math.hypot(point.x - center.x, point.z - center.z);
+        const desiredDistance = Math.max(currentDistance, baseDistance);
+        const outsidePoint = {
+            x: center.x + baseDir.x * desiredDistance,
+            y: 0,
+            z: center.z + baseDir.z * desiredDistance,
+        };
+        const snappedOutside = NavMeshManager.safeSnap(outsidePoint, desiredDistance + clearance + 0.5);
+        if (!isPointInsidePhysical(snappedOutside)) {
+            return snappedOutside;
+        }
+        if (!isPointInsidePhysical(outsidePoint)) {
+            return outsidePoint;
+        }
+        const fallbackDistance = boundary + clearance + 0.25;
+        return {
+            x: center.x + baseDir.x * fallbackDistance,
+            y: 0,
+            z: center.z + baseDir.z * fallbackDistance,
+        };
+    };
+
     let bestPoint: Vector3 | null = null;
+    let bestDir: DirectionCandidate | null = null;
     let bestScore = Number.POSITIVE_INFINITY;
 
     for (const candidate of candidates) {
         const edgeDistance = Math.min(
-            candidate.x === 0 ? Number.POSITIVE_INFINITY : halfWidth / Math.abs(candidate.x),
-            candidate.z === 0 ? Number.POSITIVE_INFINITY : halfDepth / Math.abs(candidate.z)
+            candidate.x === 0 ? Number.POSITIVE_INFINITY : navHalfWidth / Math.abs(candidate.x),
+            candidate.z === 0 ? Number.POSITIVE_INFINITY : navHalfDepth / Math.abs(candidate.z)
         );
         if (!isFinite(edgeDistance)) {
             continue;
@@ -103,22 +160,25 @@ export const computeBuildingApproachPoint = (unit: Unit, building: Building, des
         const toUnit = Math.hypot(snapped.x - unit.position.x, snapped.z - unit.position.z);
         const reachTest = NavMeshManager.projectMove(snapped, desired);
         const reachError = Math.hypot(reachTest.x - desired.x, reachTest.z - desired.z);
+        const insidePenalty = isPointInsidePhysical(snapped) ? 50 : 0;
 
         const score =
             toDesired +
             candidate.bias * 2 +
             snapDelta * 1.5 +
             reachError * 3 +
-            toUnit * 0.05;
+            toUnit * 0.05 +
+            insidePenalty;
 
         if (score < bestScore) {
             bestScore = score;
             bestPoint = snapped;
+            bestDir = candidate;
         }
     }
 
-    if (bestPoint) {
-        return bestPoint;
+    if (bestPoint && bestDir) {
+        return ensureOutside(bestPoint, bestDir);
     }
 
     return NavMeshManager.safeSnap(desired, clearance + 4);

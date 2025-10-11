@@ -13,6 +13,7 @@
   "dependencies": {
     "@react-three/drei": "^10.6.1",
     "@react-three/fiber": "^9.3.0",
+    "@screeps/pathfinding": "^0.4.17",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "three": "^0.179.1",

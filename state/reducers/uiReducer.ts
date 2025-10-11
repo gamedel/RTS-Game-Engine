@@ -5,13 +5,25 @@ export function uiReducer(state: GameState, action: Action): GameState {
         case 'SELECT_OBJECT': {
             const { id, isShift } = action.payload;
             if (id === null) {
+                if (state.selectedIds.length === 0 && !state.buildMode) {
+                    return state;
+                }
                 return { ...state, selectedIds: [], buildMode: null };
             }
             if (isShift) {
                 const newSelection = state.selectedIds.includes(id)
                     ? state.selectedIds.filter(sid => sid !== id)
                     : [...state.selectedIds, id];
+                if (newSelection.length === state.selectedIds.length && state.selectedIds.every((sid, idx) => sid === newSelection[idx]) && !state.buildMode) {
+                    return state;
+                }
                 return { ...state, selectedIds: newSelection, buildMode: null };
+            }
+            if (state.selectedIds.length === 1 && state.selectedIds[0] === id) {
+                if (!state.buildMode) {
+                    return state;
+                }
+                return { ...state, buildMode: null };
             }
             return { ...state, selectedIds: [id], buildMode: null };
         }

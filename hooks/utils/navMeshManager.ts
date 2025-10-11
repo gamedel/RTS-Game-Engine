@@ -1,6 +1,7 @@
 import type { Dispatch } from 'react';
 import { Building, ResourceNode, Vector3, Action, UnitStatus, BuildingType } from '../../types';
 import { COLLISION_DATA, getBuildingCollisionMask } from '../../constants';
+import PathFinding = require('@screeps/pathfinding');
 
 type PathRequest = {
   unitId: string;
@@ -50,14 +51,29 @@ type NavState = {
     queueDepth: number;
     pending: number;
   };
+  directionFields: Map<string, DirectionField>;
+  directionFieldOrder: string[];
+  flowQueueCx: Int32Array | null;
+  flowQueueCz: Int32Array | null;
+  flowCostScratch: Uint32Array | null;
+  flowBuildQueue: FlowBuildRequest[];
+  flowBuildPending: Set<string>;
+  flowBuildState: FlowBuildState | null;
+  pathGrid: any | null;
+  pathFinder: any | null;
+  worker: Worker | null;
+  workerReady: boolean;
+  workerBusy: boolean;
+  workerCounter: number;
+  workerPending: Map<number, WorkerRequestEntry>;
 };
 
 const WORLD_SIZE = 320;
 const HALF_WORLD = WORLD_SIZE / 2;
 const CELL_SIZE = 1;
 const SAMPLE_STEP = CELL_SIZE * 0.35;
-const MAX_QUEUE_BATCH = 96;
-const MAX_QUEUE_TIME_MS = 5;
+const MAX_QUEUE_BATCH = 24;
+const MAX_QUEUE_TIME_MS = 2.5;
 const EPSILON = 1e-4;
 const CACHE_BRIDGE_RADIUS_CELLS = 20;
 const BUILDING_EXTRA_PADDING = 0.06;
@@ -68,6 +84,8 @@ const FLOW_FIELD_CACHE_MAX = 64;
 const REPULSION_MARGIN = 0.85;
 const REPULSION_STRENGTH = 1.25;
 const REPULSION_MIN_THRESHOLD = 0.1;
+const STRAIGHT_COST = 10;
+const DIAGONAL_COST = 14;
 
 const now = typeof performance !== 'undefined' ? () => performance.now() : () => Date.now();
 
@@ -91,7 +109,22 @@ const navState: NavState = {
     lastFailureReason: null,
     queueDepth: 0,
     pending: 0
-  }
+  },
+  directionFields: new Map(),
+  directionFieldOrder: [],
+  flowQueueCx: null,
+  flowQueueCz: null,
+  flowCostScratch: null,
+  flowBuildQueue: [],
+  flowBuildPending: new Set<string>(),
+  flowBuildState: null,
+  pathGrid: null,
+  pathFinder: null,
+  worker: null,
+  workerReady: false,
+  workerBusy: false,
+  workerCounter: 0,
+  workerPending: new Map<number, WorkerRequestEntry>()
 };
 
 const requestQueue: PathRequest[] = [];
@@ -109,6 +142,45 @@ const pathCache = new Map<string, CachedPath>();
 type FlowField = { goalIdx: number; parents: Int32Array; timestamp: number };
 const flowFieldCache = new Map<string, FlowField>();
 
+type DirectionField = {
+  key: string;
+  goal: Cell;
+  timestamp: number;
+  dirX: Float32Array;
+  dirZ: Float32Array;
+};
+
+type FlowBuildRequest = {
+  key: string;
+  goal: Cell;
+  timestamp: number;
+};
+
+type FlowBuildState = {
+  key: string;
+  goal: Cell;
+  goalIdx: number;
+  dirX: Float32Array;
+  dirZ: Float32Array;
+  head: number;
+  tail: number;
+  finalizeIndex: number;
+  stage: 'expanding' | 'finalizing';
+};
+
+type WorkerRequestEntry = {
+  request: PathRequest;
+  followers: PathFollower[];
+  startCell: Cell;
+  goalCell: Cell;
+  goal: Vector3;
+};
+
+const DIRECTION_FIELD_TTL = 6000;
+const DIRECTION_FIELD_MAX = 48;
+const FLOW_BUILD_MAX_EXPANSIONS = 6000;
+const FLOW_BUILD_MAX_FINALIZE = 8000;
+
 const clusterKeyForCell = (cell: Cell) =>
   `${Math.floor(cell.cx / PATH_CACHE_CLUSTER)}|${Math.floor(cell.cz / PATH_CACHE_CLUSTER)}`;
 const cacheKeyFor = (start: Cell, goal: Cell) => `${clusterKeyForCell(start)}->${encodeCell(goal)}`;
@@ -125,6 +197,47 @@ const invalidateNavigationCaches = () => {
   invalidatePathCache();
   invalidateFlowFields();
   navState.clearanceDirty = true;
+  navState.directionFields.clear();
+  navState.directionFieldOrder.length = 0;
+  navState.flowBuildQueue.length = 0;
+  navState.flowBuildPending.clear();
+  navState.workerReady = false;
+  navState.workerBusy = false;
+  navState.workerPending.clear();
+  navState.flowBuildState = null;
+  navState.pathGrid = null;
+  navState.pathFinder = null;
+};
+
+const ensurePathGridReady = () => {
+  if (!isGridReady() || !navState.grid || !navState.matrix) return;
+  if (navState.pathGrid && navState.pathFinder) return;
+  const matrixCopy = navState.matrix.map(row => row.slice());
+  navState.pathGrid = new PathFinding.Grid(navState.grid.width, navState.grid.height, matrixCopy);
+  navState.pathFinder = new PathFinding.JumpPointFinder({
+    diagonalMovement: PathFinding.DiagonalMovement.OnlyWhenNoObstacle
+  });
+};
+
+const resetPathGridState = () => {
+  if (!navState.pathGrid || !navState.grid) return;
+  const nodes = navState.pathGrid.nodes;
+  const height = navState.grid.height;
+  const width = navState.grid.width;
+  for (let z = 0; z < height; z++) {
+    const row = nodes[z];
+    for (let x = 0; x < width; x++) {
+      const node = row[x];
+      if (node.opened || node.closed || node.parent) {
+        node.opened = false;
+        node.closed = false;
+        node.parent = null;
+        node.g = 0;
+        node.h = 0;
+        node.f = 0;
+      }
+    }
+  }
 };
 
 type HeapNode = {
@@ -196,6 +309,17 @@ const clampToWorld = (p: Vector3): Vector3 => ({
 });
 
 const encodeCell = (cell: Cell) => `${cell.cx}|${cell.cz}`;
+
+const FLOW_NEIGHBORS: Array<{ dx: number; dz: number; cost: number }> = [
+  { dx: 1, dz: 0, cost: STRAIGHT_COST },
+  { dx: -1, dz: 0, cost: STRAIGHT_COST },
+  { dx: 0, dz: 1, cost: STRAIGHT_COST },
+  { dx: 0, dz: -1, cost: STRAIGHT_COST },
+  { dx: 1, dz: 1, cost: DIAGONAL_COST },
+  { dx: -1, dz: 1, cost: DIAGONAL_COST },
+  { dx: 1, dz: -1, cost: DIAGONAL_COST },
+  { dx: -1, dz: -1, cost: DIAGONAL_COST }
+];
 
 type ReadyNavState = NavState & {
   grid: NavigationGrid;
@@ -347,8 +471,12 @@ const adjustCellOccupancy = (index: number, delta: number) => {
   const cell = cellFromIndex(index);
   if (!cell) return;
   navState.walkable[index] = blocked ? 0 : 1;
-  navState.matrix[cell.cz][cell.cx] = blocked ? 1 : 0;
+  navState.matrix[cell.cz][cell.cx] = blocked ? 0 : 1;
+  if (navState.pathGrid && navState.pathGrid.nodes) {
+    navState.pathGrid.nodes[cell.cz][cell.cx].weight = blocked ? 0 : 1;
+  }
   navState.clearanceDirty = true;
+  sendWorkerCellUpdate(cell, !blocked);
 };
 
 const markCells = (id: string, indices: number[]) => {
@@ -423,12 +551,14 @@ const rebuildStaticObstacles = (buildings: Record<string, Building>, _resources:
   navState.walkable.fill(1);
   for (let cz = 0; cz < navState.grid.height; cz++) {
     for (let cx = 0; cx < navState.grid.width; cx++) {
-      navState.matrix[cz][cx] = 0;
+      navState.matrix[cz][cx] = 1;
     }
   }
 
   Object.values(buildings).forEach(registerBuildingObstacle);
   ensureClearance();
+  ensurePathGridReady();
+  sendWorkerInit();
 };
 
 const getNeighbors = (cell: Cell): Cell[] => {
@@ -689,81 +819,15 @@ const buildFlowField = (goal: Cell): FlowField | null => {
   return field;
 };
 
-const getFlowField = (goal: Cell): FlowField | null => {
-  const key = encodeCell(goal);
-  const cached = flowFieldCache.get(key);
-  if (cached && now() - cached.timestamp <= FLOW_FIELD_TTL) {
-    return cached;
-  }
-
-  const built = buildFlowField(goal);
-  if (!built) {
-    flowFieldCache.delete(key);
-    return null;
-  }
-
-  flowFieldCache.set(key, built);
-  pruneFlowFields();
-  return built;
+const getFlowField = (_goal: Cell): FlowField | null => {
+  return null;
 };
 
-const solveWithFlowField = (start: Cell, goal: Cell): PathSolution | null => {
-  const field = getFlowField(goal);
-  if (!field) return null;
-
-  const startIdx = indexForCell(start);
-  if (startIdx < 0) return null;
-  if (field.parents[startIdx] === -1 && startIdx !== field.goalIdx) {
-    return null;
-  }
-
-  const cells: Cell[] = [];
-  const visited = new Set<number>();
-  let currentIdx = startIdx;
-
-  while (true) {
-    const cell = cellFromIndex(currentIdx);
-    if (!cell) return null;
-    cells.push(cell);
-    if (currentIdx === field.goalIdx) break;
-    const nextIdx = field.parents[currentIdx];
-    if (nextIdx < 0 || visited.has(nextIdx)) {
-      return null;
-    }
-    visited.add(currentIdx);
-    currentIdx = nextIdx;
-  }
-
-  return { cells, reachedGoal: true, expanded: cells.length, elapsedMs: 0 };
+const solveWithFlowField = (_start: Cell, _goal: Cell): PathSolution | null => {
+  return null;
 };
 
-const pathFromFlowField = (start: Cell, field: FlowField): PathSolution | null => {
-  const startIdx = indexForCell(start);
-  if (startIdx < 0) return null;
-  if (field.parents[startIdx] === -1 && startIdx !== field.goalIdx) {
-    return null;
-  }
-  if (!navState.grid) return null;
-
-  const limit = navState.grid.width * navState.grid.height + 1;
-  const visited = new Set<number>();
-  const cells: Cell[] = [];
-  let currentIdx = startIdx;
-
-  for (let steps = 0; steps < limit; steps++) {
-    if (visited.has(currentIdx)) return null;
-    visited.add(currentIdx);
-    const cell = cellFromIndex(currentIdx);
-    if (!cell) return null;
-    cells.push(cell);
-    if (currentIdx === field.goalIdx) {
-      return { cells, reachedGoal: true, expanded: cells.length, elapsedMs: 0 };
-    }
-    const nextIdx = field.parents[currentIdx];
-    if (nextIdx < 0) break;
-    currentIdx = nextIdx;
-  }
-
+const pathFromFlowField = (_start: Cell, _field: FlowField): PathSolution | null => {
   return null;
 };
 
@@ -785,36 +849,10 @@ const simplifyCells = (cells: Cell[]): Cell[] => {
   return result;
 };
 
-const heuristic = (a: Cell, b: Cell) => {
-  const dx = Math.abs(a.cx - b.cx);
-  const dz = Math.abs(a.cz - b.cz);
-  const min = Math.min(dx, dz);
-  const max = Math.max(dx, dz);
-  return min * Math.SQRT2 + (max - min);
-};
-
-const reconstructPath = (parents: Map<number, number>, startIdx: number, endIdx: number): Cell[] | null => {
-  if (!navState.grid) return null;
-  const path: Cell[] = [];
-  let current = endIdx;
-  const guard = new Set<number>();
-  while (true) {
-    const cell = cellFromIndex(current);
-    if (!cell) return null;
-    path.push(cell);
-    if (current === startIdx) break;
-    const parent = parents.get(current);
-    if (parent === undefined) return null;
-    if (guard.has(parent)) return null;
-    guard.add(parent);
-    current = parent;
-  }
-  path.reverse();
-  return path;
-};
 
 const solvePath = (start: Cell, goal: Cell): PathSolution => {
-  if (!isGridReady()) {
+  ensurePathGridReady();
+  if (!isGridReady() || !navState.pathGrid || !navState.pathFinder) {
     return { cells: [], reachedGoal: false, expanded: 0, elapsedMs: 0, failureReason: 'nav-grid-not-ready' };
   }
 
@@ -824,75 +862,36 @@ const solvePath = (start: Cell, goal: Cell): PathSolution => {
     return { cells: [], reachedGoal: false, expanded: 0, elapsedMs: 0, failureReason: 'invalid-indices' };
   }
 
-  const open = new MinHeap();
-  const gScores = new Map<number, number>();
-  const parents = new Map<number, number>();
-  const closed = new Set<number>();
-
   const startTime = now();
-
-  open.push({ idx: startIdx, cell: start, g: 0, f: heuristic(start, goal) });
-  gScores.set(startIdx, 0);
-  parents.set(startIdx, startIdx);
-
-  let bestIdx = startIdx;
-  let bestHeuristic = heuristic(start, goal);
-  let expanded = 0;
-
-  while (open.size > 0) {
-    const current = open.pop()!;
-    if (closed.has(current.idx)) continue;
-    closed.add(current.idx);
-    expanded++;
-
-    const currentHeuristic = heuristic(current.cell, goal);
-    if (currentHeuristic < bestHeuristic) {
-      bestHeuristic = currentHeuristic;
-      bestIdx = current.idx;
-    }
-
-    if (current.idx === goalIdx) {
-      const path = reconstructPath(parents, startIdx, current.idx) ?? [];
-      return { cells: path, reachedGoal: true, expanded, elapsedMs: now() - startTime };
-    }
-
-    for (const neighbor of getNeighbors(current.cell)) {
-      if (!canStep(current.cell, neighbor)) continue;
-      const neighborIdx = indexForCell(neighbor);
-      if (neighborIdx < 0) continue;
-      if (closed.has(neighborIdx)) continue;
-
-      const dx = neighbor.cx - current.cell.cx;
-      const dz = neighbor.cz - current.cell.cz;
-      const diagonal = dx !== 0 && dz !== 0;
-
-      const stepCost = diagonal ? Math.SQRT2 : 1;
-      const tentativeG = current.g + stepCost;
-
-      const existing = gScores.get(neighborIdx);
-      if (existing !== undefined && tentativeG >= existing - EPSILON) {
-        continue;
-      }
-
-      gScores.set(neighborIdx, tentativeG);
-      parents.set(neighborIdx, current.idx);
-      const fScore = tentativeG + heuristic(neighbor, goal);
-      open.push({ idx: neighborIdx, cell: neighbor, g: tentativeG, f: fScore });
-    }
-  }
-
-  const fallback = reconstructPath(parents, startIdx, bestIdx) ?? [];
+  resetPathGridState();
+  const rawPath: number[][] = navState.pathFinder.findPath(
+    start.cx,
+    start.cz,
+    goal.cx,
+    goal.cz,
+    navState.pathGrid
+  );
   const elapsedMs = now() - startTime;
-  if (fallback.length > 1) {
-    return { cells: fallback, reachedGoal: false, expanded, elapsedMs };
+
+  if (!rawPath || rawPath.length === 0) {
+    return {
+      cells: [],
+      reachedGoal: false,
+      expanded: 0,
+      elapsedMs,
+      failureReason: 'no-path-found'
+    };
   }
+
+  const cells: Cell[] = rawPath.map(([cx, cz]) => ({ cx, cz }));
+  const last = rawPath[rawPath.length - 1];
+  const reachedGoal = last && last[0] === goal.cx && last[1] === goal.cz;
 
   return {
-    cells: [],
-    reachedGoal: false,
-    expanded,
-    elapsedMs,
-    failureReason: 'no-path-found'
+    cells,
+    reachedGoal,
+    expanded: rawPath.length,
+    elapsedMs
   };
 };
 
@@ -1027,51 +1026,28 @@ const applySolution = (
 
 const deliverFollowers = (
   followers: PathFollower[],
-  referenceGoalCell: Cell,
-  referenceSolution: PathSolution
+  _referenceGoalCell: Cell,
+  _referenceSolution: PathSolution
 ) => {
   if (!followers.length) return;
 
-  const referenceCached: CachedPath | null = referenceSolution.cells.length
-    ? { cells: referenceSolution.cells, timestamp: now(), reachedGoal: referenceSolution.reachedGoal }
-    : null;
-  const flowField = getFlowField(referenceGoalCell);
-
   for (const follower of followers) {
     const followerGoal = clampToWorld(follower.goal);
-    const followerStart = clampToWorld(follower.start);
-    const startCell = follower.startCell ?? findNearestWalkableCell(worldToCell(followerStart.x, followerStart.z));
-    const goalCell = follower.goalCell ?? referenceGoalCell;
-
-    if (!startCell || !goalCell) {
-      handlePathFailure(follower.unitId, 'missing-start-or-goal', true);
+    if (!isWorldWalkable(followerGoal)) {
+      handlePathFailure(follower.unitId, 'goal-not-walkable', true);
       continue;
     }
 
-    let solution: PathSolution | null = null;
-    if (referenceCached) {
-      solution = bridgeCachedPath(startCell, referenceCached);
-    }
-    if (!solution && flowField) {
-      solution = pathFromFlowField(startCell, flowField);
-    }
-    if (!solution) {
-      solution = computePathSolution(startCell, goalCell);
-    }
-
-    if (!solution) {
-      handlePathFailure(follower.unitId, 'no-path', true);
-      continue;
-    }
-
-    applySolution(follower.unitId, followerGoal, startCell, solution, true);
+    NavMeshManager.requestPath(follower.unitId, follower.start, follower.goal);
   }
 };
 
 const processNextRequest = () => {
-  if (!isGridReady()) return;
+  if (!isGridReady()) return false;
+  ensureWorker();
+  if (!navState.worker || navState.workerBusy || !navState.workerReady) return false;
   const req = requestQueue.shift();
-  if (!req) return;
+  if (!req) return false;
 
   const unitId = req.unitId;
   if (req.key) {
@@ -1093,7 +1069,7 @@ const processNextRequest = () => {
     for (const follower of followers) {
       handlePathFailure(follower.unitId, 'missing-start-or-goal', true);
     }
-    return;
+    return true;
   }
 
   if (startCell.cx === goalCell.cx && startCell.cz === goalCell.cz) {
@@ -1113,12 +1089,34 @@ const processNextRequest = () => {
         handlePathFailure(follower.unitId, 'goal-not-walkable', true);
       }
     }
-    return;
+    return true;
   }
 
-  const solution = computePathSolution(startCell, goalCell);
-  applySolution(unitId, clampedGoal, startCell, solution);
-  deliverFollowers(followers, goalCell, solution);
+  ensureWorker();
+  if (!navState.worker || navState.workerBusy || !navState.workerReady) {
+    // Worker became unavailable; push request back for later processing
+    requestQueue.unshift(req);
+    return false;
+  }
+
+  const requestId = ++navState.workerCounter;
+  navState.workerBusy = true;
+  navState.workerPending.set(requestId, {
+    request: req,
+    followers,
+    startCell,
+    goalCell,
+    goal: clampedGoal
+  });
+
+  navState.worker.postMessage({
+    type: 'path',
+    id: requestId,
+    start: [startCell.cx, startCell.cz],
+    goal: [goalCell.cx, goalCell.cz]
+  });
+
+  return true;
 };
 
 const projectMoveInternal = (from: Vector3, to: Vector3): Vector3 => {
@@ -1252,12 +1250,181 @@ const advanceOnNavInternal = (from: Vector3, to: Vector3, maxStep: number): Vect
   return projectMoveInternal(from, adjustedTarget);
 };
 
+const pruneDirectionFields = (timestamp: number) => {
+  const order = navState.directionFieldOrder;
+  let index = 0;
+  while (index < order.length) {
+    const key = order[index];
+    const field = navState.directionFields.get(key);
+    if (!field || timestamp - field.timestamp > DIRECTION_FIELD_TTL) {
+      navState.directionFields.delete(key);
+      order.splice(index, 1);
+    } else {
+      index++;
+    }
+  }
+
+  while (order.length > DIRECTION_FIELD_MAX) {
+    const oldest = order.shift();
+    if (!oldest) break;
+    navState.directionFields.delete(oldest);
+  }
+};
+
+const touchDirectionField = (key: string, timestamp: number) => {
+  const order = navState.directionFieldOrder;
+  const existingIndex = order.indexOf(key);
+  if (existingIndex >= 0) {
+    order.splice(existingIndex, 1);
+  }
+  order.push(key);
+  pruneDirectionFields(timestamp);
+};
+
+const normalizeFlowGoalCell = (cell: Cell | null): Cell | null => {
+  if (!cell) return null;
+  if (isCellTraversable(cell)) return cell;
+  return findNearestWalkableCell(cell);
+};
+
+const handleWorkerMessage = (event: MessageEvent<any>) => {
+  const data = event.data;
+  if (!data) return;
+
+  if (data.type === 'init-complete') {
+    navState.workerReady = true;
+    navState.workerBusy = false;
+    navState.workerPending.clear();
+    processNextRequest();
+    return;
+  }
+
+  if (data.type === 'path-result') {
+    const entry = navState.workerPending.get(data.id);
+    if (!entry) {
+      navState.workerBusy = false;
+      processNextRequest();
+      return;
+    }
+
+    navState.workerPending.delete(data.id);
+    navState.workerBusy = false;
+
+    if (data.error) {
+      handlePathFailure(entry.request.unitId, data.error);
+      for (const follower of entry.followers) {
+        handlePathFailure(follower.unitId, data.error, true);
+      }
+    } else {
+      const cells: Cell[] = data.path.map(([cx, cz]: [number, number]) => ({ cx, cz }));
+      const solution: PathSolution = {
+        cells,
+        reachedGoal: data.reachedGoal ?? false,
+        expanded: data.path.length,
+        elapsedMs: data.elapsedMs ?? 0
+      };
+
+      applySolution(entry.request.unitId, entry.goal, entry.startCell, solution);
+      deliverFollowers(entry.followers, entry.goalCell, solution);
+    }
+
+    processNextRequest();
+  }
+};
+
+const ensureWorker = () => {
+  if (typeof window === 'undefined' || typeof Worker === 'undefined') return;
+  if (navState.worker) return;
+
+  try {
+    const worker = new Worker(new URL('../../workers/pathWorker.ts', import.meta.url), {
+      type: 'module'
+    });
+    worker.onmessage = handleWorkerMessage;
+    worker.onerror = event => {
+      console.error('[NavMeshWorker] error', event);
+    };
+
+    navState.worker = worker;
+    navState.workerReady = false;
+    navState.workerBusy = false;
+    navState.workerCounter = 0;
+    navState.workerPending.clear();
+
+    if (navState.grid && navState.matrix) {
+      sendWorkerInit();
+    }
+  } catch (error) {
+    console.error('[NavMeshWorker] failed to create worker', error);
+    navState.worker = null;
+    navState.workerReady = false;
+  }
+};
+
+const sendWorkerInit = () => {
+  if (!navState.worker || !navState.grid || !navState.matrix) return;
+  const { width, height } = navState.grid;
+  const flattened = new Uint8Array(width * height);
+  let index = 0;
+  for (let z = 0; z < height; z++) {
+    for (let x = 0; x < width; x++, index++) {
+      flattened[index] = navState.matrix[z][x] ? 1 : 0;
+    }
+  }
+  navState.workerReady = false;
+  navState.workerBusy = false;
+  navState.workerCounter = 0;
+  navState.workerPending.clear();
+  navState.worker.postMessage(
+    {
+      type: 'init',
+      width,
+      height,
+      matrix: flattened
+    },
+    [flattened.buffer]
+  );
+};
+
+const sendWorkerCellUpdate = (cell: Cell, walkable: boolean) => {
+  if (!navState.worker || !navState.workerReady) return;
+  navState.worker.postMessage({
+    type: 'update',
+    x: cell.cx,
+    y: cell.cz,
+    weight: walkable ? 1 : 0
+  });
+};
+
+const scheduleDirectionFieldBuild = (_goal: Cell, _key: string) => {
+  return;
+};
+
+const startNextFlowFieldBuild = () => {
+  return;
+};
+
+const processDirectionFieldBuild = () => {
+  return;
+};
+
+const ensureDirectionField = (_goal: Cell): DirectionField | null => {
+  return null;
+};
+
+const sampleDirectionField = (_goal: Vector3, _position: Vector3): { x: number; z: number } | null => {
+  return null;
+};
+
+const invalidateDirectionField = (_goal: Vector3) => {
+  return;
+};
+
 const snapToNavInternal = (point: Vector3): Vector3 => {
   if (!isGridReady()) return clampToWorld(point);
   const nearest = findNearestWalkableCell(worldToCell(point.x, point.z));
   return nearest ? clampToWorld(cellToWorld(nearest)) : clampToWorld(point);
 };
-
 const safeSnapInternal = (target: Vector3, maxSnapDistance: number): Vector3 => {
   if (!isGridReady()) return clampToWorld(target);
   const maxCells = Math.max(1, Math.ceil(maxSnapDistance / navState.grid.cellSize));
@@ -1320,6 +1487,15 @@ export const NavMeshManager = {
     navState.clearance.fill(0);
     navState.clearanceDirty = true;
     navState.obstacles.clear();
+    navState.directionFields.clear();
+    navState.directionFieldOrder.length = 0;
+    navState.flowBuildQueue.length = 0;
+    navState.flowBuildPending.clear();
+    navState.flowBuildState = null;
+    navState.pathGrid = new PathFinding.Grid(width, height);
+    navState.pathFinder = new PathFinding.JumpPointFinder({
+      diagonalMovement: PathFinding.DiagonalMovement.OnlyWhenNoObstacle
+    });
     requestQueue.length = 0;
     pendingRequests.clear();
     queuedRequestsByKey.clear();
@@ -1332,8 +1508,12 @@ export const NavMeshManager = {
     const adjustedRadius = Math.min(maxUnitRadius, 0.6);
     navState.agentPadding = adjustedRadius;
     navState.requiredClearance = adjustedRadius + CLEARANCE_MARGIN;
+    navState.flowQueueCx = new Int32Array(width * height);
+    navState.flowQueueCz = new Int32Array(width * height);
+    navState.flowCostScratch = new Uint32Array(width * height);
 
     rebuildStaticObstacles(buildings, resources);
+    ensureWorker();
     navState.ready = true;
   },
 
@@ -1342,6 +1522,7 @@ export const NavMeshManager = {
     invalidateNavigationCaches();
     registerBuildingObstacle(building);
     ensureClearance();
+    ensurePathGridReady();
   },
 
   removeObstacle(building: Building) {
@@ -1349,10 +1530,12 @@ export const NavMeshManager = {
     invalidateNavigationCaches();
     unmarkCells(`building:${building.id}`);
     ensureClearance();
+    ensurePathGridReady();
   },
 
   requestPath(unitId: string, startPos: Vector3, endPos: Vector3) {
     if (!navState.ready || pendingRequests.has(unitId)) return;
+    ensureWorker();
 
     const start = clampToWorld(startPos);
     const goal = clampToWorld(endPos);
@@ -1419,13 +1602,22 @@ export const NavMeshManager = {
     return advanceOnNavInternal(from, to, maxStep);
   },
 
+  sampleFlowDirection(goal: Vector3, position: Vector3) {
+    return sampleDirectionField(goal, position);
+  },
+
+  invalidateFlowField(goal: Vector3) {
+    invalidateDirectionField(goal);
+  },
+
   processQueue() {
     if (!navState.ready) return;
     updateDiagnostics({ queueDepth: requestQueue.length, pending: pendingRequests.size });
     const frameStart = now();
     for (let i = 0; i < MAX_QUEUE_BATCH; i++) {
       if (!requestQueue.length) break;
-      processNextRequest();
+      const dispatched = processNextRequest();
+      if (!dispatched) break;
       if (now() - frameStart >= MAX_QUEUE_TIME_MS) {
         break;
       }
@@ -1442,11 +1634,22 @@ export const NavMeshManager = {
     navState.clearance = null;
     navState.clearanceDirty = false;
     navState.obstacles.clear();
+    navState.directionFields.clear();
+    navState.directionFieldOrder.length = 0;
+    navState.flowQueueCx = null;
+    navState.flowQueueCz = null;
+    navState.flowCostScratch = null;
     requestQueue.length = 0;
     pendingRequests.clear();
     queuedRequestsByKey.clear();
     followersByKey.clear();
     navState.requiredClearance = 0;
+    navState.worker?.terminate();
+    navState.worker = null;
+    navState.workerReady = false;
+    navState.workerBusy = false;
+    navState.workerCounter = 0;
+    navState.workerPending.clear();
     invalidateNavigationCaches();
     updateDiagnostics({
       lastSearchMs: 0,

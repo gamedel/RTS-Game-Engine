@@ -1,7 +1,5 @@
-import { Unit, Building } from '../../types';
+import { Unit, Building, UnitType } from '../../types';
 import { COLLISION_DATA, getBuildingCollisionMask } from '../../constants';
-import * as THREE from 'three';
-
 const BUILDING_DEPENETRATION_PADDING = 0.12;
 const MIN_PUSH_EPSILON = 0.2;
 const CONTACT_MARGIN_MIN = 0.25;
@@ -93,17 +91,24 @@ export function getDepenetrationVector(unit: Unit, building: Building): { x: num
     return null;
 }
 
-export function getSeparationVector(unit: Unit, otherUnits: Unit[]): THREE.Vector3 {
-  const separationVector = new THREE.Vector3();
+export type Vec2 = { x: number; z: number };
+
+export function getSeparationVector(unit: Unit, otherUnits: Unit[], out?: Vec2): Vec2 | null {
+  let sumX = 0;
+  let sumZ = 0;
   let neighbors = 0;
+
   const desiredSeparation = (COLLISION_DATA.UNITS[unit.unitType].radius * 2) + 0.5;
   const desiredSq = desiredSeparation * desiredSeparation;
-
   const ux = unit.position.x;
   const uz = unit.position.z;
 
   for (const other of otherUnits) {
     if (!other || unit.id === other.id) continue;
+
+    if (unit.unitType === UnitType.WORKER && other.unitType === UnitType.WORKER) {
+      continue;
+    }
 
     const dx = ux - other.position.x;
     const dz = uz - other.position.z;
@@ -114,14 +119,22 @@ export function getSeparationVector(unit: Unit, otherUnits: Unit[]): THREE.Vecto
     if (dist <= 0) continue;
 
     const inv = 1 / dist;
-    separationVector.x += dx * inv;
-    separationVector.z += dz * inv;
+    sumX += dx * inv;
+    sumZ += dz * inv;
     neighbors++;
   }
 
-  if (neighbors > 0) {
-    separationVector.multiplyScalar(1 / neighbors);
+  if (!neighbors) {
+    if (out) {
+      out.x = 0;
+      out.z = 0;
+    }
+    return null;
   }
 
-  return separationVector;
+  const result = out ?? { x: 0, z: 0 };
+  const invNeighbors = 1 / neighbors;
+  result.x = sumX * invNeighbors;
+  result.z = sumZ * invNeighbors;
+  return result;
 }

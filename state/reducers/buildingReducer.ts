@@ -1,8 +1,9 @@
 import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
-import { GameState, Action, Building, GameObjectType, UnitType, UnitStatus, BuildingType } from '../../types';
+import { GameState, Action, Building, GameObjectType, UnitType, UnitStatus, BuildingType, WorkerOrder } from '../../types';
 import { BUILDING_CONFIG, UNIT_CONFIG, TOWER_UPGRADE_CONFIG, COLLISION_DATA } from '../../constants';
 import { NavMeshManager } from '../../hooks/utils/navMeshManager';
+import { computeBuildingApproachPoint } from '../../hooks/utils/buildingApproach';
 
 
 export function buildingReducer(state: GameState, action: Action): GameState {
@@ -50,6 +51,7 @@ export function buildingReducer(state: GameState, action: Action): GameState {
             };
 
             const updatedUnits = { ...state.units };
+            const now = Date.now();
             const buildingSize = COLLISION_DATA.BUILDINGS[type];
 
             // --- Eject any units trapped by the new building foundation ---
@@ -91,6 +93,15 @@ export function buildingReducer(state: GameState, action: Action): GameState {
                         targetId: undefined,
                         buildTask: undefined,
                         repairTask: undefined,
+                        workerOrder: undefined,
+                        gatherTargetId: undefined,
+                        isHarvesting: false,
+                        harvestingResourceType: undefined,
+                        gatherTimer: undefined,
+                        buildTimer: undefined,
+                        repairTimer: undefined,
+                        interactionAnchor: undefined,
+                        interactionRadius: undefined,
                         path: undefined,
                         pathIndex: undefined,
                         targetPosition: undefined,
@@ -104,20 +115,43 @@ export function buildingReducer(state: GameState, action: Action): GameState {
 
             workerIds.forEach((workerId, index) => {
                 const w = updatedUnits[workerId] || state.units[workerId];
-                if(w) {
+                if (w) {
                     const angle = (index / workerIds.length) * 2 * Math.PI;
-                    const targetPos = {
+                    const desired = {
                         x: position.x + Math.cos(angle) * requiredDistance,
                         y: 0,
-                        z: position.z + Math.sin(angle) * requiredDistance
+                        z: position.z + Math.sin(angle) * requiredDistance,
+                    };
+                    const approach = computeBuildingApproachPoint(w, newBuilding, desired);
+                    const interactionRadius = Math.hypot(approach.x - position.x, approach.z - position.z);
+                    const buildOrder: WorkerOrder = {
+                        kind: 'build',
+                        buildingId: newBuildingId,
+                        phase: 'travelToSite',
+                        anchor: approach,
+                        radius: interactionRadius,
+                        issuedAt: now,
+                        lastProgressAt: now,
+                        retries: 0,
                     };
 
                     updatedUnits[workerId] = {
                         ...w,
                         status: UnitStatus.MOVING,
-                        pathTarget: targetPos,
+                        pathTarget: approach,
                         targetId: newBuildingId,
                         buildTask: { buildingId: newBuildingId, position },
+                        repairTask: undefined,
+                        workerOrder: buildOrder,
+                        interactionAnchor: approach,
+                        interactionRadius,
+                        gatherTargetId: undefined,
+                        isHarvesting: false,
+                        harvestingResourceType: undefined,
+                        gatherTimer: undefined,
+                        buildTimer: 0,
+                        repairTimer: undefined,
+                        finalDestination: undefined,
                         path: undefined,
                         pathIndex: undefined,
                         targetPosition: undefined,
@@ -168,7 +202,20 @@ export function buildingReducer(state: GameState, action: Action): GameState {
                 Object.keys(updatedUnits).forEach(unitId => {
                     const unit = updatedUnits[unitId];
                     if (unit.targetId === id || unit.buildTask?.buildingId === id) {
-                        updatedUnits[unitId] = { ...unit, status: UnitStatus.IDLE, targetId: undefined, buildTask: undefined, pathTarget: undefined };
+                        updatedUnits[unitId] = {
+                            ...unit,
+                            status: UnitStatus.IDLE,
+                            targetId: undefined,
+                            buildTask: undefined,
+                            repairTask: undefined,
+                            workerOrder: undefined,
+                            gatherTargetId: undefined,
+                            isHarvesting: false,
+                            harvestingResourceType: undefined,
+                            pathTarget: undefined,
+                            interactionAnchor: undefined,
+                            interactionRadius: undefined,
+                        };
                     }
                 });
 

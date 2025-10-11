@@ -46,6 +46,37 @@ export enum UnitStance {
     HOLD_GROUND = 'HOLD_GROUND',
 }
 
+export type WorkerGatherPhase = 'travelToResource' | 'harvesting' | 'travelToDropoff';
+export type WorkerBuildPhase = 'travelToSite' | 'building';
+export type WorkerRepairPhase = 'travelToTarget' | 'repairing';
+
+type WorkerOrderBase = {
+    anchor: Vector3;
+    radius: number;
+    issuedAt: number;
+    lastProgressAt: number;
+    retries: number;
+};
+
+export type WorkerOrder =
+    | (WorkerOrderBase & {
+        kind: 'gather';
+        resourceId: string;
+        resourceType: ResourceType;
+        phase: WorkerGatherPhase;
+        dropoffId?: string;
+    })
+    | (WorkerOrderBase & {
+        kind: 'build';
+        buildingId: string;
+        phase: WorkerBuildPhase;
+    })
+    | (WorkerOrderBase & {
+        kind: 'repair';
+        buildingId: string;
+        phase: WorkerRepairPhase;
+    });
+
 export enum AnimationState {
     IDLE = 'IDLE',
     WALKING = 'WALKING',
@@ -104,6 +135,8 @@ export interface Unit extends BaseGameObject {
   buildTimer?: number;
   repairTimer?: number;
   gatherTargetId?: string;
+  interactionAnchor?: Vector3;
+  interactionRadius?: number;
   path?: Vector3[];
   pathIndex?: number;
   pathTarget?: Vector3; // Final destination of the current path
@@ -120,6 +153,8 @@ export interface Unit extends BaseGameObject {
   // Death animation
   isDying?: boolean;
   deathTime?: number;
+  // Worker task metadata
+  workerOrder?: WorkerOrder;
 }
 
 export interface Building extends BaseGameObject {

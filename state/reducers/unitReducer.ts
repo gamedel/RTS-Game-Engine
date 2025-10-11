@@ -1,10 +1,282 @@
-import * as THREE from 'three';
 import { v4 as uuidv4 } from 'uuid';
-import { GameState, Action, Unit, GameObjectType, UnitType, UnitStatus, Building, ResourceNode, FloatingText, UnitStance, BuildingType, ResourceType, Vector3, ResearchCategory } from '../../types';
-import { UNIT_CONFIG, COLLISION_DATA, RESEARCH_CONFIG, RESOURCE_NODE_INTERACTION_RADIUS } from '../../constants';
-import { NavMeshManager } from '../../hooks/utils/navMeshManager';
+import { GameState, Action, Unit, GameObjectType, UnitType, UnitStatus, Building, ResourceNode, FloatingText, UnitStance, BuildingType, ResourceType, Vector3, ResearchCategory, WorkerOrder } from '../../types';
+import { UNIT_CONFIG, COLLISION_DATA, RESEARCH_CONFIG } from '../../constants';
 import { computeBuildingApproachPoint } from '../../hooks/utils/buildingApproach';
+import { computeGatherAssignment } from '../../hooks/utils/gatherSlots';
 
+type CommandTarget = Unit | Building | ResourceNode;
+
+const DROP_OFF_BUILDING_TYPES = new Set<BuildingType>([
+    BuildingType.TOWN_HALL,
+    BuildingType.WAREHOUSE,
+]);
+
+const isDropoffBuilding = (building: Building): boolean =>
+    DROP_OFF_BUILDING_TYPES.has(building.buildingType);
+
+const getBuildingApproach = (unit: Unit, building: Building, desired: Vector3 | undefined) => {
+    const approach = computeBuildingApproachPoint(unit, building, desired ?? building.position);
+    const radius = Math.hypot(approach.x - building.position.x, approach.z - building.position.z);
+    return { approach, radius };
+};
+
+const resetWorkerState = (worker: Unit) => ({
+    workerOrder: undefined,
+    isHarvesting: false,
+    harvestingResourceType: undefined,
+    gatherTargetId: undefined,
+    buildTask: undefined,
+    repairTask: undefined,
+    gatherTimer: undefined,
+    buildTimer: undefined,
+    repairTimer: undefined,
+});
+
+const createGatherOrder = (
+    state: GameState,
+    worker: Unit,
+    resource: ResourceNode,
+    now: number,
+    anchor: Vector3,
+    radius: number,
+): WorkerOrder => ({
+    kind: 'gather',
+    resourceId: resource.id,
+    resourceType: resource.resourceType,
+    phase: 'travelToResource',
+    anchor,
+    radius,
+    dropoffId: undefined,
+    issuedAt: now,
+    lastProgressAt: now,
+    retries: 0,
+});
+
+const createBuildOrder = (
+    building: Building,
+    anchor: Vector3,
+    radius: number,
+    now: number,
+): WorkerOrder => ({
+    kind: 'build',
+    buildingId: building.id,
+    phase: 'travelToSite',
+    anchor,
+    radius,
+    issuedAt: now,
+    lastProgressAt: now,
+    retries: 0,
+});
+
+const createRepairOrder = (
+    building: Building,
+    anchor: Vector3,
+    radius: number,
+    now: number,
+): WorkerOrder => ({
+    kind: 'repair',
+    buildingId: building.id,
+    phase: 'travelToTarget',
+    anchor,
+    radius,
+    issuedAt: now,
+    lastProgressAt: now,
+    retries: 0,
+});
+
+const stripWorkerOrders = (unit: Unit): Unit => {
+    const cleared = resetWorkerState(unit);
+    return {
+        ...unit,
+        ...cleared,
+        finalDestination: undefined,
+    };
+};
+
+const applyGenericUnitCommand = (
+    state: GameState,
+    unit: Unit,
+    target: CommandTarget | null,
+    targetPosition: Vector3 | undefined,
+    requestedFinalDestination: Vector3 | undefined,
+): Unit => {
+    let nextTargetId: string | undefined = target ? target.id : undefined;
+    let nextPathTarget: Vector3 | undefined = targetPosition;
+    let interactionAnchor: Vector3 | undefined;
+    let interactionRadius: number | undefined;
+
+    if (target) {
+        if (target.type === GameObjectType.BUILDING) {
+            const building = target as Building;
+            const { approach, radius } = getBuildingApproach(unit, building, targetPosition);
+            nextPathTarget = approach;
+            interactionAnchor = approach;
+            interactionRadius = radius;
+        } else {
+            nextPathTarget = target.position;
+        }
+    }
+
+    let nextFinalDestination = unit.finalDestination;
+    if (requestedFinalDestination) {
+        nextFinalDestination = requestedFinalDestination;
+    } else if (!target) {
+        nextFinalDestination = undefined;
+    }
+
+    return {
+        ...unit,
+        status: UnitStatus.MOVING,
+        targetId: nextTargetId,
+        pathTarget: nextPathTarget ?? targetPosition,
+        finalDestination: nextFinalDestination,
+        path: undefined,
+        pathIndex: undefined,
+        targetPosition: undefined,
+        interactionAnchor,
+        interactionRadius,
+    };
+};
+
+const resolveWorkerSpecialCommand = (
+    state: GameState,
+    worker: Unit,
+    target: CommandTarget | null,
+    targetPosition: Vector3 | undefined,
+    now: number,
+): Unit | null => {
+    if (!target) return null;
+
+    if (target.type === GameObjectType.RESOURCE) {
+        const resource = target as ResourceNode;
+        if (resource.amount <= 0 || resource.isFalling) {
+            return {
+                ...worker,
+                ...resetWorkerState(worker),
+                status: UnitStatus.IDLE,
+                targetId: undefined,
+                pathTarget: undefined,
+                interactionAnchor: undefined,
+                interactionRadius: undefined,
+                finalDestination: undefined,
+            };
+        }
+        const { anchor, radius } = computeGatherAssignment(state, worker, resource);
+        const order = createGatherOrder(state, worker, resource, now, anchor, radius);
+        return {
+            ...worker,
+            status: UnitStatus.MOVING,
+            targetId: resource.id,
+            gatherTargetId: resource.id,
+            pathTarget: anchor,
+            interactionAnchor: anchor,
+            interactionRadius: radius,
+            finalDestination: undefined,
+            workerOrder: order,
+            isHarvesting: true,
+            harvestingResourceType: resource.resourceType,
+            buildTask: undefined,
+            repairTask: undefined,
+            buildTimer: undefined,
+            repairTimer: undefined,
+            gatherTimer: 0,
+            path: undefined,
+            pathIndex: undefined,
+            targetPosition: undefined,
+        };
+    }
+
+    if (target.type === GameObjectType.BUILDING && target.playerId === worker.playerId) {
+        const building = target as Building;
+        const { approach, radius } = getBuildingApproach(worker, building, targetPosition);
+
+        if (building.constructionProgress !== undefined && building.constructionProgress < 1) {
+            const order = createBuildOrder(building, approach, radius, now);
+            return {
+                ...worker,
+                status: UnitStatus.MOVING,
+                targetId: building.id,
+                gatherTargetId: undefined,
+                pathTarget: approach,
+                interactionAnchor: approach,
+                interactionRadius: radius,
+                finalDestination: undefined,
+                workerOrder: order,
+                buildTask: { buildingId: building.id, position: building.position },
+                repairTask: undefined,
+                isHarvesting: false,
+                harvestingResourceType: undefined,
+                buildTimer: 0,
+                repairTimer: undefined,
+                gatherTimer: undefined,
+                path: undefined,
+                pathIndex: undefined,
+                targetPosition: undefined,
+            };
+        }
+
+        if (building.hp < building.maxHp) {
+            const order = createRepairOrder(building, approach, radius, now);
+            return {
+                ...worker,
+                status: UnitStatus.MOVING,
+                targetId: building.id,
+                gatherTargetId: undefined,
+                pathTarget: approach,
+                interactionAnchor: approach,
+                interactionRadius: radius,
+                finalDestination: undefined,
+                workerOrder: order,
+                buildTask: undefined,
+                repairTask: { buildingId: building.id },
+                isHarvesting: false,
+                harvestingResourceType: undefined,
+                buildTimer: undefined,
+                repairTimer: 0,
+                gatherTimer: undefined,
+                path: undefined,
+                pathIndex: undefined,
+                targetPosition: undefined,
+            };
+        }
+
+        if (
+            isDropoffBuilding(building) &&
+            worker.resourcePayload &&
+            worker.resourcePayload.amount > 0 &&
+            worker.workerOrder &&
+            worker.workerOrder.kind === 'gather'
+        ) {
+            const order: WorkerOrder = {
+                ...worker.workerOrder,
+                phase: 'travelToDropoff',
+                dropoffId: building.id,
+                anchor: approach,
+                radius,
+                issuedAt: now,
+                lastProgressAt: now,
+                retries: 0,
+            };
+            return {
+                ...worker,
+                status: UnitStatus.MOVING,
+                targetId: building.id,
+                pathTarget: approach,
+                interactionAnchor: approach,
+                interactionRadius: radius,
+                finalDestination: undefined,
+                workerOrder: order,
+                buildTask: undefined,
+                repairTask: undefined,
+                path: undefined,
+                pathIndex: undefined,
+                targetPosition: undefined,
+            };
+        }
+    }
+
+    return null;
+};
 export function unitReducer(state: GameState, action: Action): GameState {
     switch (action.type) {
         case 'COMMAND_UNIT': {
@@ -12,223 +284,152 @@ export function unitReducer(state: GameState, action: Action): GameState {
             const unit = state.units[unitId];
             if (!unit) return state;
 
-            const targetObject = targetId ?
-                state.units[targetId] || state.buildings[targetId] || state.resourcesNodes[targetId]
-                : null;
-            
-            let newFinalDestination: Vector3 | undefined = unit.finalDestination;
-            if (action.payload.finalDestination) {
-                newFinalDestination = action.payload.finalDestination;
+            let targetObject: CommandTarget | null = null;
+            if (targetId) {
+                targetObject =
+                    (state.units[targetId] as CommandTarget | undefined) ??
+                    (state.buildings[targetId] as CommandTarget | undefined) ??
+                    (state.resourcesNodes[targetId] as CommandTarget | undefined) ??
+                    null;
             }
 
-            let taskAssignment: { isHarvesting: boolean; harvestingResourceType?: ResourceType } = {
-                isHarvesting: unit.isHarvesting,
-                harvestingResourceType: unit.harvestingResourceType,
-            };
-            
             if (unit.status === UnitStatus.FLEEING && targetObject?.type === GameObjectType.BUILDING) {
-                return { ...state, units: { ...state.units, [unitId]: { ...unit, targetPosition: targetPosition, targetId: targetId, path: undefined, pathIndex: undefined, pathTarget: undefined } }};
-            }
-
-            const isWorkerRepairing =
-                unit.unitType === UnitType.WORKER &&
-                targetObject?.type === GameObjectType.BUILDING &&
-                targetObject.playerId === unit.playerId &&
-                (targetObject as Building).hp < (targetObject as Building).maxHp &&
-                (targetObject as Building).constructionProgress === undefined;
-
-            const isWorkerConstructing = 
-                unit.unitType === UnitType.WORKER && 
-                targetObject?.type === GameObjectType.BUILDING && 
-                (targetObject as Building).constructionProgress !== undefined;
-
-            const isGatherCommand = unit.unitType === UnitType.WORKER && targetObject?.type === GameObjectType.RESOURCE;
-            
-            const isSpecialTask = isWorkerRepairing || isWorkerConstructing || isGatherCommand;
-            if (isSpecialTask) {
-                newFinalDestination = undefined;
-                taskAssignment = { isHarvesting: isGatherCommand, harvestingResourceType: isGatherCommand ? (targetObject as ResourceNode).resourceType : undefined };
-            } else if (!targetObject || targetObject.playerId === unit.playerId) {
-                // This is a simple move command, not a persistent harvest task
-                taskAssignment = { isHarvesting: false, harvestingResourceType: undefined };
-            }
-
-
-            if (isWorkerRepairing) {
-                const approachPosition = computeBuildingApproachPoint(unit, targetObject as Building, targetPosition);
                 return {
                     ...state,
                     units: {
                         ...state.units,
                         [unitId]: {
                             ...unit,
-                            ...taskAssignment,
-                            status: UnitStatus.MOVING,
-                            pathTarget: approachPosition,
-                            targetId: targetId,
-                            repairTask: { buildingId: targetId! },
-                            buildTask: undefined,
-                            resourcePayload: undefined,
-                            finalDestination: newFinalDestination,
+                            targetPosition,
+                            targetId,
                             path: undefined,
                             pathIndex: undefined,
-                            targetPosition: undefined,
-                        },
-                    },
-                };
-            }
-            if (isWorkerConstructing) {
-                const building = targetObject as Building;
-                const approachPosition = computeBuildingApproachPoint(unit, building, targetPosition ?? building.position);
-                return {
-                    ...state,
-                    units: {
-                        ...state.units,
-                        [unitId]: {
-                            ...unit,
-                            ...taskAssignment,
-                            status: UnitStatus.MOVING,
-                            pathTarget: approachPosition,
-                            targetId: building.id,
-                            buildTask: { buildingId: building.id, position: building.position },
-                            finalDestination: newFinalDestination,
-                            path: undefined,
-                            pathIndex: undefined,
-                            targetPosition: undefined,
+                            pathTarget: undefined,
                         },
                     },
                 };
             }
 
-            let finalTargetPosition = targetPosition;
-            if (isGatherCommand) {
-                const resource = targetObject as ResourceNode;
-                const resourceRadius = RESOURCE_NODE_INTERACTION_RADIUS[resource.resourceType] ?? 1;
-                const unitConfig = COLLISION_DATA.UNITS[unit.unitType];
-                const stoppingDistance = resourceRadius + unitConfig.radius + 0.2;
-                const numSlots = 8;
-                const resourceCenter = new THREE.Vector3(resource.position.x, 0, resource.position.z);
-                const otherWorkersAtResource = Object.values(state.units).filter(u => u.id !== unitId && u.unitType === UnitType.WORKER && (u.targetId === resource.id || u.gatherTargetId === resource.id));
-                const occupiedPositions = otherWorkersAtResource.map(u => {
-                    const target = u.pathTarget || u.targetPosition; // Use pathTarget first
-                    return target ? new THREE.Vector3(target.x, target.y, target.z) : new THREE.Vector3(u.position.x, u.position.y, u.position.z)
-                });
-                let bestSlot: THREE.Vector3 | null = null;
-                let minDistanceSq = Infinity;
-                for (let i = 0; i < numSlots; i++) {
-                    const angle = (i / numSlots) * Math.PI * 2;
-                    const slotPosition = new THREE.Vector3(resourceCenter.x + stoppingDistance * Math.cos(angle), 0, resourceCenter.z + stoppingDistance * Math.sin(angle));
-                    const isOccupied = occupiedPositions.some(p => p.distanceToSquared(slotPosition) < (unitConfig.radius * 2) ** 2);
-                    if (!isOccupied) {
-                        const distanceSqToUnit = slotPosition.distanceToSquared(new THREE.Vector3(unit.position.x, 0, unit.position.z));
-                        if (distanceSqToUnit < minDistanceSq) {
-                            minDistanceSq = distanceSqToUnit;
-                            bestSlot = slotPosition;
-                        }
-                    }
+            const now = Date.now();
+            const updatedUnits = { ...state.units };
+
+            if (unit.unitType === UnitType.WORKER) {
+                const handled = resolveWorkerSpecialCommand(state, unit, targetObject, targetPosition, now);
+                if (handled) {
+                    updatedUnits[unitId] = handled;
+                    return { ...state, units: updatedUnits };
                 }
-                finalTargetPosition = bestSlot ? { x: bestSlot.x, y: 0, z: bestSlot.z } : finalTargetPosition;
+
+                const generic = applyGenericUnitCommand(state, unit, targetObject, targetPosition, finalDestination);
+                updatedUnits[unitId] = stripWorkerOrders(generic);
+                return { ...state, units: updatedUnits };
             }
 
-            if (targetObject?.type === GameObjectType.BUILDING) {
-                finalTargetPosition = computeBuildingApproachPoint(
-                    unit,
-                    targetObject as Building,
-                    finalTargetPosition ?? targetObject.position
-                );
-            }
-
-            const updatedUnit: Unit = {
-                ...unit,
-                ...taskAssignment,
-                status: UnitStatus.MOVING,
-                pathTarget: finalTargetPosition,
-                targetId,
-                gatherTargetId: isGatherCommand ? targetId : undefined,
-                finalDestination: newFinalDestination,
-                buildTask: undefined,
-                repairTask: undefined,
-                buildTimer: undefined,
-                repairTimer: undefined,
-                gatherTimer: 0,
-                // Do not clear payload on move command, worker might be repositioning with resources
-                resourcePayload: isGatherCommand ? undefined : unit.resourcePayload, 
-                path: undefined,
-                pathIndex: undefined,
-                targetPosition: undefined,
-            };
-
-            return { ...state, units: { ...state.units, [unitId]: updatedUnit } };
+            const updatedUnit = applyGenericUnitCommand(state, unit, targetObject, targetPosition, finalDestination);
+            updatedUnits[unitId] = updatedUnit;
+            return { ...state, units: updatedUnits };
         }
         case 'WORKER_FINISH_DROPOFF': {
             const { workerId } = action.payload;
             const worker = state.units[workerId];
+            if (!worker) return state;
 
-            if (!worker || !worker.resourcePayload || worker.resourcePayload.amount === 0) {
-                if (worker) {
-                    // This case handles a worker commanded to a dropoff without resources. Just make it idle.
-                    const updatedWorker = { ...worker, status: UnitStatus.IDLE, targetId: undefined, gatherTargetId: undefined, isHarvesting: false };
-                    return { ...state, units: { ...state.units, [workerId]: updatedWorker } };
+            const payload = worker.resourcePayload;
+            let players = state.players;
+            let floatingTexts = state.floatingTexts;
+
+            if (payload && payload.amount > 0) {
+                const player = state.players[worker.playerId];
+                const updatedPlayerResources = {
+                    gold: player.resources.gold + (payload.type === 'GOLD' ? payload.amount : 0),
+                    wood: player.resources.wood + (payload.type === 'WOOD' ? payload.amount : 0),
+                };
+                const newPlayers = [...state.players];
+                newPlayers[worker.playerId] = { ...player, resources: updatedPlayerResources };
+                players = newPlayers;
+
+                const dropOffBuilding = worker.targetId ? state.buildings[worker.targetId] : undefined;
+                if (dropOffBuilding && player.isHuman) {
+                    const floatingId = uuidv4();
+                    const floatingText: FloatingText = {
+                        id: floatingId,
+                        text: `+${payload.amount}`,
+                        resourceType: payload.type,
+                        position: { x: dropOffBuilding.position.x, y: 3, z: dropOffBuilding.position.z },
+                        startTime: Date.now(),
+                    };
+                    floatingTexts = { ...floatingTexts, [floatingId]: floatingText };
                 }
-                return state;
             }
 
-            const { amount, type } = worker.resourcePayload;
-            const playerId = worker.playerId;
-            const player = state.players[playerId];
-            
-            let newState: GameState = { ...state };
+            const now = Date.now();
+            let nextWorker: Unit;
 
-            const currentResources = player.resources;
-            const updatedResources = {
-                gold: currentResources.gold + (type === 'GOLD' ? amount : 0),
-                wood: currentResources.wood + (type === 'WOOD' ? amount : 0),
-            };
-            const newPlayers = [...state.players];
-            newPlayers[playerId] = { ...player, resources: updatedResources };
-            newState.players = newPlayers;
-
-
-            const dropOffBuilding = Object.values(state.buildings).find(b => b.playerId === playerId && b.id === worker.targetId);
-            if (dropOffBuilding && player.isHuman) {
-                const newFloatingTextId = uuidv4();
-                const newFloatingText: FloatingText = {
-                    id: newFloatingTextId, text: `+${amount}`, resourceType: type,
-                    position: { x: dropOffBuilding.position.x, y: 3, z: dropOffBuilding.position.z }, startTime: Date.now()
-                };
-                newState.floatingTexts = { ...state.floatingTexts, [newFloatingTextId]: newFloatingText };
-            }
-
-            const resourceToReturnTo = worker.gatherTargetId ? state.resourcesNodes[worker.gatherTargetId] : null;
-            let updatedWorker: Unit;
-            
-            if (worker.isHarvesting && resourceToReturnTo && resourceToReturnTo.amount > 0 && !resourceToReturnTo.isFalling) {
-                updatedWorker = {
-                    ...worker,
-                    resourcePayload: undefined,
-                    gatherTimer: 0,
-                    status: UnitStatus.MOVING,
-                    targetId: resourceToReturnTo.id,
-                    pathTarget: resourceToReturnTo.position,
-                    path: undefined,
-                    pathIndex: undefined,
-                    targetPosition: undefined,
-                };
+            if (worker.workerOrder && worker.workerOrder.kind === 'gather') {
+                const resource = state.resourcesNodes[worker.workerOrder.resourceId];
+                if (resource && resource.amount > 0 && !resource.isFalling) {
+                    const { anchor, radius } = computeGatherAssignment(state, worker, resource);
+                    const nextOrder: WorkerOrder = {
+                        ...worker.workerOrder,
+                        phase: 'travelToResource',
+                        dropoffId: undefined,
+                        anchor,
+                        radius,
+                        issuedAt: now,
+                        lastProgressAt: now,
+                        retries: 0,
+                    };
+                    nextWorker = {
+                        ...worker,
+                        resourcePayload: undefined,
+                        status: UnitStatus.MOVING,
+                        targetId: resource.id,
+                        gatherTargetId: resource.id,
+                        workerOrder: nextOrder,
+                        pathTarget: anchor,
+                        interactionAnchor: anchor,
+                        interactionRadius: radius,
+                        gatherTimer: 0,
+                        finalDestination: undefined,
+                        path: undefined,
+                        pathIndex: undefined,
+                        targetPosition: undefined,
+                        isHarvesting: true,
+                        harvestingResourceType: resource.resourceType,
+                    };
+                } else {
+                    nextWorker = {
+                        ...worker,
+                        ...resetWorkerState(worker),
+                        resourcePayload: undefined,
+                        status: UnitStatus.IDLE,
+                        targetId: undefined,
+                        gatherTargetId: undefined,
+                        interactionAnchor: undefined,
+                        interactionRadius: undefined,
+                    };
+                }
             } else {
-                updatedWorker = {
+                nextWorker = {
                     ...worker,
+                    ...resetWorkerState(worker),
                     resourcePayload: undefined,
-                    gatherTimer: 0,
-                    targetId: undefined,
                     status: UnitStatus.IDLE,
-                    isHarvesting: worker.isHarvesting,
-                    harvestingResourceType: worker.isHarvesting ? worker.harvestingResourceType : undefined,
+                    targetId: undefined,
                     gatherTargetId: undefined,
+                    interactionAnchor: undefined,
+                    interactionRadius: undefined,
                 };
             }
 
-            newState.units = { ...state.units, [workerId]: updatedWorker };
-            return newState;
+            const units = { ...state.units, [workerId]: nextWorker };
+
+            return {
+                ...state,
+                players,
+                units,
+                floatingTexts,
+            };
         }
         case 'UPDATE_UNIT': {
             const { id, ...rest } = action.payload;

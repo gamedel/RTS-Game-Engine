@@ -11,4 +11,9 @@ declare global {
   }
 }
 
+declare module '@screeps/pathfinding' {
+  const PathFinding: any;
+  export = PathFinding;
+}
+
 export {};
