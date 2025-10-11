@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { GameState, Action, GameObjectType, Unit, Building, Vector3, FloatingText, UnitType } from '../../types';
 import { v4 as uuidv4 } from 'uuid';
-import { COLLISION_DATA, getDefenseBonus, arePlayersHostile } from '../../constants';
+import { getDefenseBonus, arePlayersHostile, getBuildingCollisionMask } from '../../constants';
 import { SpatialHash } from '../utils/spatial';
 import { BufferedDispatch } from '../../state/batch';
 
@@ -140,7 +140,7 @@ export const processProjectileLogic = (state: GameState, delta: number, dispatch
                         if (building) {
                              const buildingOwner = state.players[building.playerId];
                             if (building.id !== p.targetId && arePlayersHostile(owner, buildingOwner) && building.hp > 0 && building.constructionProgress === undefined) {
-                                const buildingSize = COLLISION_DATA.BUILDINGS[building.buildingType];
+                                const buildingSize = getBuildingCollisionMask(building.buildingType);
                                 const buildingBox = { minX: building.position.x - buildingSize.width / 2, maxX: building.position.x + buildingSize.width / 2, minZ: building.position.z - buildingSize.depth / 2, maxZ: building.position.z + buildingSize.depth / 2 };
                                 const circle = { x: impactPosition.x, z: impactPosition.z, radius: p.aoeRadius! };
                                 

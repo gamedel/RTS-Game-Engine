@@ -1,6 +1,6 @@
 import type { Dispatch } from 'react';
 import { Building, ResourceNode, Vector3, Action, UnitStatus } from '../../types';
-import { COLLISION_DATA } from '../../constants';
+import { COLLISION_DATA, getBuildingCollisionMask } from '../../constants';
 
 type PathRequest = {
   unitId: string;
@@ -60,8 +60,9 @@ const MAX_QUEUE_BATCH = 96;
 const MAX_QUEUE_TIME_MS = 5;
 const EPSILON = 1e-4;
 const CACHE_BRIDGE_RADIUS_CELLS = 20;
-const BUILDING_EXTRA_PADDING = 1.5;
-const CLEARANCE_MARGIN = 1.1;
+const BUILDING_EXTRA_PADDING = 0.12;
+const CLEARANCE_MARGIN = 0.3;
+const BUILDING_AGENT_PADDING_CAP = 0.5;
 const FLOW_FIELD_TTL = 4500;
 const FLOW_FIELD_CACHE_MAX = 64;
 const REPULSION_MARGIN = 0.85;
@@ -391,11 +392,14 @@ const eachCellInRect = (minX: number, maxX: number, minZ: number, maxZ: number):
 const registerBuildingObstacle = (building: Building) => {
   if (!navState.grid) return;
   if (building.constructionProgress !== undefined) return;
-  const size = COLLISION_DATA.BUILDINGS[building.buildingType];
-  if (!size) return;
-  const pad = navState.agentPadding + BUILDING_EXTRA_PADDING;
-  const halfWidth = size.width / 2 + pad;
-  const halfDepth = size.depth / 2 + pad;
+  const scaled = getBuildingCollisionMask(building.buildingType);
+  const fallback = COLLISION_DATA.BUILDINGS[building.buildingType];
+  const width = scaled.width > 0 ? scaled.width : fallback?.width ?? 0;
+  const depth = scaled.depth > 0 ? scaled.depth : fallback?.depth ?? 0;
+  if (width <= 0 || depth <= 0) return;
+  const pad = Math.min(navState.agentPadding, BUILDING_AGENT_PADDING_CAP) + BUILDING_EXTRA_PADDING;
+  const halfWidth = width / 2 + pad;
+  const halfDepth = depth / 2 + pad;
   const minX = building.position.x - halfWidth;
   const maxX = building.position.x + halfWidth;
   const minZ = building.position.z - halfDepth;
