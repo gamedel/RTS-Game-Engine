@@ -217,6 +217,15 @@ const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, s
   const DOUBLE_CLICK_TIMEOUT = isTouchDevice ? 400 : 300; // ms
   const humanPlayer = gameState.players.find(p => p.isHuman);
 
+  const preventEventDefault = useCallback((event: any) => {
+    if (!event) return;
+    if (typeof event.preventDefault === 'function') {
+      event.preventDefault();
+    } else if (event?.nativeEvent && typeof event.nativeEvent.preventDefault === 'function') {
+      event.nativeEvent.preventDefault();
+    }
+  }, []);
+
   const selectedIdsSet = useMemo(() => new Set(gameState.selectedIds), [gameState.selectedIds]);
 
 
@@ -289,6 +298,7 @@ const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, s
   
   const handleObjectContextMenu = useCallback((e: any, targetId: string) => {
     if (gamePhase !== 'playing' || !humanPlayer) return;
+    preventEventDefault(e);
     e.stopPropagation();
     if (gameState.buildMode) {
         dispatch({ type: 'SET_BUILD_MODE', payload: null });
@@ -314,7 +324,7 @@ const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, s
         };
         dispatch({ type: 'ADD_COMMAND_MARKER', payload: marker });
     }
-  }, [dispatch, gameState.selectedIds, gameState.units, gameState.buildMode, allObjectsMap, gamePhase, humanPlayer]);
+  }, [dispatch, gameState.selectedIds, gameState.units, gameState.buildMode, allObjectsMap, gamePhase, humanPlayer, preventEventDefault]);
 
   const processGroundSimpleClick = useCallback((e: any) => {
     if (gamePhase !== 'playing' || !humanPlayer) return;
@@ -369,6 +379,7 @@ const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, s
 
   const handleGroundContextMenu = useCallback((e: any) => {
     if (gamePhase !== 'playing' || !humanPlayer) return;
+    preventEventDefault(e);
     e.stopPropagation();
     if (gameState.buildMode) {
         dispatch({ type: 'SET_BUILD_MODE', payload: null });
@@ -426,7 +437,7 @@ const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, s
             dispatch({ type: 'ADD_COMMAND_MARKER', payload: marker });
         });
     }
-  }, [dispatch, gameState.selectedIds, gameState.units, gameState.buildings, gameState.buildMode, gamePhase, humanPlayer]);
+  }, [dispatch, gameState.selectedIds, gameState.units, gameState.buildings, gameState.buildMode, gamePhase, humanPlayer, preventEventDefault]);
 
   const handleGroundPointerDown = useCallback((e: any) => {
     if (gamePhase !== 'playing') return;
@@ -689,7 +700,7 @@ const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, s
           onPointerMove={(e) => handleObjectPointerMove(e, obj.id)}
           onPointerCancel={handleObjectPointerCancel}
           onContextMenu={(e) => {
-            e.preventDefault();
+            preventEventDefault(e);
             handleObjectContextMenu(e, obj.id);
           }}
         >

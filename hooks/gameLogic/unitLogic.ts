@@ -94,12 +94,12 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                 payload: { id: unit.id, lastPositionCheck: { pos: unit.position, time: now } }
             });
         } else {
-            if (now - unit.lastPositionCheck.time > 700) {
+            if (now - unit.lastPositionCheck.time > 500) {
                 const dx = unit.position.x - unit.lastPositionCheck.pos.x;
                 const dz = unit.position.z - unit.lastPositionCheck.pos.z;
                 const movedSq = dx * dx + dz * dz;
 
-                if ((unit.status === UnitStatus.MOVING || !!unit.path) && unit.pathTarget && movedSq < 0.1 * 0.1) {
+                if ((unit.status === UnitStatus.MOVING || !!unit.path) && unit.pathTarget && movedSq < 0.05 * 0.05) {
                     NavMeshManager.requestPath(unit.id, unit.position, unit.pathTarget);
                 }
 
@@ -180,11 +180,55 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                 }
             } else {
                 const step = Math.max(UNIT_CONFIG[unit.unitType].speed * delta, 0.01);
-                const next = NavMeshManager.advanceOnNav(
-                  { x: unit.position.x, y: 0, z: unit.position.z },
-                  { x: waypoint.x,      y: 0, z: waypoint.z },
-                  step
-                );
+                const currentPos = { x: unit.position.x, y: 0, z: unit.position.z };
+                const desiredPos = { x: waypoint.x, y: 0, z: waypoint.z };
+                let next = NavMeshManager.advanceOnNav(currentPos, desiredPos, step);
+
+                // If advance produced no movement (likely stuck on corner), try a small perpendicular nudge
+                const noProgress = (Math.abs(next.x - currentPos.x) < 1e-4) && (Math.abs(next.z - currentPos.z) < 1e-4);
+                if (noProgress) {
+                    const dirX = desiredPos.x - currentPos.x;
+                    const dirZ = desiredPos.z - currentPos.z;
+                    const len = Math.hypot(dirX, dirZ) || 1;
+                    const nx = dirX / len;
+                    const nz = dirZ / len;
+                    const lateralLeft = { x: -nz, z: nx };
+                    const lateralRight = { x: nz, z: -nx };
+                    const nudge = Math.min(step * 1.2, 0.8);
+                    const steerOptions = [
+                        {
+                            x: (lateralLeft.x * 0.8 + nx * 0.2),
+                            z: (lateralLeft.z * 0.8 + nz * 0.2),
+                        },
+                        {
+                            x: (lateralRight.x * 0.8 + nx * 0.2),
+                            z: (lateralRight.z * 0.8 + nz * 0.2),
+                        },
+                    ];
+
+                    let bestMove = next;
+                    let bestDistance = 0;
+                    for (const option of steerOptions) {
+                        const optLen = Math.hypot(option.x, option.z) || 1;
+                        const dir = { x: option.x / optLen, z: option.z / optLen };
+                        const candidateTarget = {
+                            x: currentPos.x + dir.x * nudge,
+                            y: 0,
+                            z: currentPos.z + dir.z * nudge,
+                        };
+                        const candidate = NavMeshManager.advanceOnNav(currentPos, candidateTarget, nudge);
+                        const moved = Math.hypot(candidate.x - currentPos.x, candidate.z - currentPos.z);
+                        if (moved > bestDistance + 1e-4) {
+                            bestDistance = moved;
+                            bestMove = candidate;
+                        }
+                    }
+
+                    if (bestDistance > 1e-4) {
+                        next = bestMove;
+                    }
+                }
+
                 dispatch({ type: 'UPDATE_UNIT', payload: { id: unit.id, position: next } });
             }
         } 

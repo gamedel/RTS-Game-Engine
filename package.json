@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "bundle": "node --loader ts-node/esm scripts/buildBundle.ts",
+    "bundle": "node scripts/buildBundle.mjs",
+    "bundle:watch": "node scripts/buildBundle.mjs --watch",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -68,10 +68,11 @@ export const COLLISION_DATA = {
     }
 };
 
-export const BUILDING_COLLISION_MASK_SCALE = 0.4;
+export const BUILDING_COLLISION_MASK_SCALE = 0.2;
 
 const BUILDING_COLLISION_MASK_SCALE_OVERRIDES: Partial<Record<BuildingType, number>> = {
-    [BuildingType.TOWN_HALL]: 0.3,
+    [BuildingType.TOWN_HALL]: 0.58,
+    [BuildingType.DEFENSIVE_TOWER]: 0.22,
 };
 
 export const getBuildingCollisionMask = (buildingType: BuildingType) => {
@@ -81,7 +82,6 @@ export const getBuildingCollisionMask = (buildingType: BuildingType) => {
     }
 
     const scale = BUILDING_COLLISION_MASK_SCALE_OVERRIDES[buildingType] ?? BUILDING_COLLISION_MASK_SCALE;
-
     return {
         width: base.width * scale,
         depth: base.depth * scale,

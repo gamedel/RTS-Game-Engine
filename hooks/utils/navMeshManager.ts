@@ -1,5 +1,5 @@
 import type { Dispatch } from 'react';
-import { Building, ResourceNode, Vector3, Action, UnitStatus } from '../../types';
+import { Building, ResourceNode, Vector3, Action, UnitStatus, BuildingType } from '../../types';
 import { COLLISION_DATA, getBuildingCollisionMask } from '../../constants';
 
 type PathRequest = {
@@ -60,9 +60,9 @@ const MAX_QUEUE_BATCH = 96;
 const MAX_QUEUE_TIME_MS = 5;
 const EPSILON = 1e-4;
 const CACHE_BRIDGE_RADIUS_CELLS = 20;
-const BUILDING_EXTRA_PADDING = 0.12;
-const CLEARANCE_MARGIN = 0.3;
-const BUILDING_AGENT_PADDING_CAP = 0.5;
+const BUILDING_EXTRA_PADDING = 0.06;
+const CLEARANCE_MARGIN = 0.12;
+const BUILDING_AGENT_PADDING_CAP = 0.3;
 const FLOW_FIELD_TTL = 4500;
 const FLOW_FIELD_CACHE_MAX = 64;
 const REPULSION_MARGIN = 0.85;
@@ -397,9 +397,16 @@ const registerBuildingObstacle = (building: Building) => {
   const width = scaled.width > 0 ? scaled.width : fallback?.width ?? 0;
   const depth = scaled.depth > 0 ? scaled.depth : fallback?.depth ?? 0;
   if (width <= 0 || depth <= 0) return;
-  const pad = Math.min(navState.agentPadding, BUILDING_AGENT_PADDING_CAP) + BUILDING_EXTRA_PADDING;
-  const halfWidth = width / 2 + pad;
-  const halfDepth = depth / 2 + pad;
+  // Adaptive padding: keep obstacle inflation reasonable for small masks
+  const basePad = Math.min(navState.agentPadding * 0.5, BUILDING_AGENT_PADDING_CAP) + BUILDING_EXTRA_PADDING;
+  const padScale = building.buildingType === BuildingType.TOWN_HALL ? 0.55 : 1;
+  const directionalPad = basePad * padScale;
+  const halfGeomW = width / 2;
+  const halfGeomD = depth / 2;
+  const padX = Math.min(directionalPad, halfGeomW * 0.35);
+  const padZ = Math.min(directionalPad, halfGeomD * 0.35);
+  const halfWidth = halfGeomW + padX;
+  const halfDepth = halfGeomD + padZ;
   const minX = building.position.x - halfWidth;
   const maxX = building.position.x + halfWidth;
   const minZ = building.position.z - halfDepth;
@@ -1215,9 +1222,21 @@ const advanceOnNavInternal = (from: Vector3, to: Vector3, maxStep: number): Vect
     return projected;
   }
 
+  let repulsionX = repulsion.x;
+  let repulsionZ = repulsion.z;
+  if (navState.ready) {
+    const distanceToGoal = Math.hypot(to.x - projected.x, to.z - projected.z);
+    const relaxationRadius = (navState.agentPadding || 0) + CLEARANCE_MARGIN + 0.1;
+    if (distanceToGoal < relaxationRadius && relaxationRadius > EPSILON) {
+      const factor = Math.max(0, Math.min(1, distanceToGoal / relaxationRadius));
+      repulsionX *= factor;
+      repulsionZ *= factor;
+    }
+  }
+
   const combined = {
-    x: direction.x + repulsion.x,
-    z: direction.z + repulsion.z
+    x: direction.x + repulsionX,
+    z: direction.z + repulsionZ
   };
   const combinedLength = Math.hypot(combined.x, combined.z);
   if (combinedLength < EPSILON) {
@@ -1310,8 +1329,9 @@ export const NavMeshManager = {
 
     const unitRadii = Object.values(COLLISION_DATA.UNITS).map(u => u.radius);
     const maxUnitRadius = unitRadii.length ? Math.max(...unitRadii) : 0.5;
-    navState.agentPadding = maxUnitRadius;
-    navState.requiredClearance = maxUnitRadius + CLEARANCE_MARGIN;
+    const adjustedRadius = Math.min(maxUnitRadius, 0.6);
+    navState.agentPadding = adjustedRadius;
+    navState.requiredClearance = adjustedRadius + CLEARANCE_MARGIN;
 
     rebuildStaticObstacles(buildings, resources);
     navState.ready = true;

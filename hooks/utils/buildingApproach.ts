@@ -1,4 +1,4 @@
-import { Building, Unit, Vector3 } from '../../types';
+import { Building, Unit, Vector3, BuildingType } from '../../types';
 import { COLLISION_DATA, getBuildingCollisionMask } from '../../constants';
 import { NavMeshManager } from './navMeshManager';
 
@@ -21,8 +21,14 @@ export const computeBuildingApproachPoint = (unit: Unit, building: Building, des
     const center = building.position;
     const halfWidth = buildingCollision.width / 2;
     const halfDepth = buildingCollision.depth / 2;
-    const clearance = unitCollision.radius + 0.3;
-    const cornerPadding = clearance * 0.65;
+    let clearance = unitCollision.radius + 0.35;
+    if (building.buildingType === BuildingType.TOWN_HALL) {
+        clearance = unitCollision.radius + 0.32;
+    }
+    let cornerPadding = clearance * 0.65;
+    if (building.buildingType === BuildingType.TOWN_HALL) {
+        cornerPadding = clearance * 0.55;
+    }
 
     let dirX = desired.x - center.x;
     let dirZ = desired.z - center.z;

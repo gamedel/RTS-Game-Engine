@@ -266,7 +266,13 @@ function AppContent() {
               shadows={false}
               dpr={isTouchDevice ? 1 : [1, 1.25]}
               gl={{ antialias: false, powerPreference: 'high-performance' }}
-              onContextMenu={(e) => e.preventDefault()}
+              onContextMenu={(e) => {
+                if (typeof e.preventDefault === 'function') {
+                  e.preventDefault();
+                } else if (e?.nativeEvent && typeof e.nativeEvent.preventDefault === 'function') {
+                  e.nativeEvent.preventDefault();
+                }
+              }}
             >
                 <GameScene
                   gamePhase={gamePhase}
