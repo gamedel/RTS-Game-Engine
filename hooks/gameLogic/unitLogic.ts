@@ -190,6 +190,19 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
 
         // --- Non-Movement & Timer Logic (when not following a path) ---
         if (!unit.path) {
+            if (unit.unitType === UnitType.WORKER && unit.isHarvesting) {
+                const gatherTarget = unit.gatherTargetId ? resourcesNodes[unit.gatherTargetId] : undefined;
+                if (!gatherTarget || gatherTarget.amount <= 0 || gatherTarget.isFalling) {
+                    findAndAssignNewResource(unit, unit.harvestingResourceType, state, dispatch);
+                    continue;
+                }
+
+                if (unit.status === UnitStatus.IDLE && unit.targetId !== gatherTarget.id) {
+                    dispatch({ type: 'COMMAND_UNIT', payload: { unitId: unit.id, targetPosition: gatherTarget.position, targetId: gatherTarget.id } });
+                    continue;
+                }
+            }
+
             if (unit.status === UnitStatus.GATHERING) {
                 const gatherTarget = unit.targetId ? resourcesNodes[unit.targetId] : null;
                 if (!gatherTarget || gatherTarget.amount <= 0 || gatherTarget.isFalling) {

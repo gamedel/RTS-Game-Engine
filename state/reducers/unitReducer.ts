@@ -330,16 +330,16 @@ export function unitReducer(state: GameState, action: Action): GameState {
                     targetPosition: undefined,
                 };
             } else {
-                updatedWorker = { 
-                    ...worker, 
-                    resourcePayload: undefined, 
-                    gatherTimer: 0, 
+                updatedWorker = {
+                    ...worker,
+                    resourcePayload: undefined,
+                    gatherTimer: 0,
                     targetId: undefined,
                     status: UnitStatus.IDLE,
-                    isHarvesting: false,
-                    harvestingResourceType: undefined,
+                    isHarvesting: worker.isHarvesting,
+                    harvestingResourceType: worker.isHarvesting ? worker.harvestingResourceType : undefined,
                     gatherTargetId: undefined,
-                 };
+                };
             }
 
             newState.units = { ...state.units, [workerId]: updatedWorker };
