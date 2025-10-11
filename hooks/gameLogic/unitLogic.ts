@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { BufferedDispatch } from '../../state/batch';
 import { NavMeshManager } from '../utils/navMeshManager';
 import { getDepenetrationVector, getSeparationVector } from '../utils/physics';
+import { computeBuildingApproachPoint } from '../utils/buildingApproach';
 import { SpatialHash } from '../utils/spatial';
 
 // Helper to find the nearest object from a list to a given unit
@@ -237,15 +238,16 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                     if (newPayloadAmount >= carryCapacity) {
                         const dropOff = findClosestDropOffPoint(unit, buildings);
                         if (dropOff) {
-                            dispatch({ 
-                                type: 'UPDATE_UNIT', 
-                                payload: { 
-                                    id: unit.id, 
-                                    gatherTimer: 0, 
+                            const approachPosition = computeBuildingApproachPoint(unit, dropOff, dropOff.position);
+                            dispatch({
+                                type: 'UPDATE_UNIT',
+                                payload: {
+                                    id: unit.id,
+                                    gatherTimer: 0,
                                     resourcePayload: { type: resourceType, amount: newPayloadAmount },
                                     status: UnitStatus.MOVING,
                                     targetId: dropOff.id,
-                                    pathTarget: dropOff.position,
+                                    pathTarget: approachPosition,
                                     gatherTargetId: gatherTarget.id,
                                     path: undefined,
                                     pathIndex: undefined,
