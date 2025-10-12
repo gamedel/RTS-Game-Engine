@@ -1,5 +1,5 @@
 import { GameState, Action } from '../types';
-import { buildingReducer } from './reducers/buildingReducer';
+import { buildingReducer, applyBuildingCollapse } from './reducers/buildingReducer';
 import { projectileReducer } from './reducers/projectileReducer';
 import { resourceReducer } from './reducers/resourceReducer';
 import { uiReducer } from './reducers/uiReducer';
@@ -31,13 +31,44 @@ export function gameReducer(state: GameState, action: Action): GameState {
     }
 
     if (buildings && buildings.length > 0) {
-        const updatedBuildings = { ...nextState.buildings };
-        buildings.forEach(patch => {
-            if (updatedBuildings[patch.id]) {
-                updatedBuildings[patch.id] = { ...updatedBuildings[patch.id], ...patch };
+        let updatedState = nextState;
+        let buildingBuffer: GameState['buildings'] | null = null;
+
+        const getCurrentBuildings = () => buildingBuffer ?? updatedState.buildings;
+        const commitBuildingBuffer = () => {
+            if (buildingBuffer) {
+                updatedState = { ...updatedState, buildings: buildingBuffer };
+                buildingBuffer = null;
             }
+        };
+
+        buildings.forEach(patch => {
+            const currentBuildings = getCurrentBuildings();
+            const current = currentBuildings[patch.id];
+            if (!current) return;
+
+            const merged = { ...current, ...patch };
+            if (typeof merged.hp === 'number' && merged.hp < 0) {
+                merged.hp = 0;
+            }
+
+            if (patch.hp !== undefined && patch.hp <= 0) {
+                commitBuildingBuffer();
+                updatedState = applyBuildingCollapse(updatedState, patch.id, current, merged, Date.now());
+                return;
+            }
+
+            if (!buildingBuffer) {
+                buildingBuffer = { ...currentBuildings };
+            }
+            buildingBuffer[patch.id] = merged;
         });
-        nextState.buildings = updatedBuildings;
+
+        if (buildingBuffer) {
+            updatedState = { ...updatedState, buildings: buildingBuffer };
+        }
+
+        nextState = updatedState;
     }
     
     if (projectiles && projectiles.length > 0) {

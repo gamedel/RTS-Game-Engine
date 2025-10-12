@@ -5,6 +5,100 @@ import { BUILDING_CONFIG, UNIT_CONFIG, TOWER_UPGRADE_CONFIG, COLLISION_DATA } fr
 import { NavMeshManager } from '../../hooks/utils/navMeshManager';
 import { computeBuildingApproachPoint } from '../../hooks/utils/buildingApproach';
 
+export const applyBuildingCollapse = (
+    state: GameState,
+    buildingId: string,
+    originalBuilding: Building,
+    updatedBuilding: Building,
+    collapseStartedAt = Date.now(),
+): GameState => {
+    if (originalBuilding.isCollapsing) {
+        const collapsingSnapshot: Building = {
+            ...updatedBuilding,
+            hp: 0,
+            isCollapsing: true,
+            collapseStartedAt: originalBuilding.collapseStartedAt ?? collapseStartedAt,
+        };
+
+        return {
+            ...state,
+            buildings: { ...state.buildings, [buildingId]: collapsingSnapshot },
+        };
+    }
+
+    if (originalBuilding.constructionProgress === undefined) {
+        NavMeshManager.removeObstacle(originalBuilding);
+    }
+
+    const updatedUnits = { ...state.units };
+    Object.keys(updatedUnits).forEach(unitId => {
+        const unit = updatedUnits[unitId];
+        if (unit.targetId === buildingId || unit.buildTask?.buildingId === buildingId) {
+            updatedUnits[unitId] = {
+                ...unit,
+                status: UnitStatus.IDLE,
+                targetId: undefined,
+                buildTask: undefined,
+                repairTask: undefined,
+                workerOrder: undefined,
+                gatherTargetId: undefined,
+                isHarvesting: false,
+                harvestingResourceType: undefined,
+                pathTarget: undefined,
+                interactionAnchor: undefined,
+                interactionRadius: undefined,
+            };
+        }
+    });
+
+    const collapsingBuilding: Building = {
+        ...updatedBuilding,
+        hp: 0,
+        isCollapsing: true,
+        collapseStartedAt,
+        targetId: undefined,
+        trainingQueue: [],
+        researchQueue: Array.isArray(updatedBuilding.researchQueue) ? [] : updatedBuilding.researchQueue,
+        constructionProgress: undefined,
+    };
+
+    const buildingsSnapshot: Record<string, Building> = {
+        ...state.buildings,
+        [buildingId]: collapsingBuilding,
+    };
+
+    Object.keys(buildingsSnapshot).forEach(otherId => {
+        if (otherId === buildingId) return;
+        const otherBuilding = buildingsSnapshot[otherId];
+        if (otherBuilding.targetId === buildingId) {
+            buildingsSnapshot[otherId] = { ...otherBuilding, targetId: undefined };
+        }
+    });
+
+    let nextState: GameState = {
+        ...state,
+        buildings: buildingsSnapshot,
+        units: updatedUnits,
+        selectedIds: state.selectedIds.filter(sid => sid !== buildingId),
+    };
+
+    if (originalBuilding.buildingType === BuildingType.HOUSE && originalBuilding.constructionProgress === undefined) {
+        const playerId = originalBuilding.playerId;
+        const player = state.players[playerId];
+        const newPlayers = [...state.players];
+        newPlayers[playerId] = {
+            ...player,
+            population: {
+                ...player.population,
+                cap: Math.max(10, player.population.cap - 10),
+            },
+        };
+        nextState = { ...nextState, players: newPlayers };
+    }
+
+    return nextState;
+};
+
 
 export function buildingReducer(state: GameState, action: Action): GameState {
     switch (action.type) {
@@ -193,81 +287,7 @@ export function buildingReducer(state: GameState, action: Action): GameState {
             }
 
             if (rest.hp !== undefined && rest.hp <= 0) {
-                if (originalBuilding.isCollapsing) {
-                    return {
-                        ...state,
-                        buildings: { ...state.buildings, [id]: { ...updatedBuilding, hp: 0 } },
-                    };
-                }
-
-                const collapseStartedAt = Date.now();
-                if (originalBuilding.constructionProgress === undefined) {
-                    NavMeshManager.removeObstacle(originalBuilding);
-                }
-
-                const updatedUnits = { ...state.units };
-                Object.keys(updatedUnits).forEach(unitId => {
-                    const unit = updatedUnits[unitId];
-                    if (unit.targetId === id || unit.buildTask?.buildingId === id) {
-                        updatedUnits[unitId] = {
-                            ...unit,
-                            status: UnitStatus.IDLE,
-                            targetId: undefined,
-                            buildTask: undefined,
-                            repairTask: undefined,
-                            workerOrder: undefined,
-                            gatherTargetId: undefined,
-                            isHarvesting: false,
-                            harvestingResourceType: undefined,
-                            pathTarget: undefined,
-                            interactionAnchor: undefined,
-                            interactionRadius: undefined,
-                        };
-                    }
-                });
-
-                const collapsingBuilding: Building = {
-                    ...updatedBuilding,
-                    hp: 0,
-                    isCollapsing: true,
-                    collapseStartedAt,
-                    targetId: undefined,
-                    trainingQueue: [],
-                    researchQueue: Array.isArray(updatedBuilding.researchQueue) ? [] : updatedBuilding.researchQueue,
-                    constructionProgress: undefined,
-                };
-
-                const buildingsSnapshot = { ...state.buildings, [id]: collapsingBuilding };
-                Object.keys(buildingsSnapshot).forEach(buildingId => {
-                    if (buildingId === id) return;
-                    const b = buildingsSnapshot[buildingId];
-                    if (b.targetId === id) {
-                        buildingsSnapshot[buildingId] = { ...b, targetId: undefined };
-                    }
-                });
-
-                let nextState: GameState = {
-                    ...state,
-                    buildings: buildingsSnapshot,
-                    units: updatedUnits,
-                    selectedIds: state.selectedIds.filter(sid => sid !== id),
-                };
-
-                if (originalBuilding.buildingType === BuildingType.HOUSE && originalBuilding.constructionProgress === undefined) {
-                    const playerId = originalBuilding.playerId;
-                    const player = state.players[playerId];
-                    const newPlayers = [...state.players];
-                    newPlayers[playerId] = {
-                        ...player,
-                        population: {
-                            ...player.population,
-                            cap: Math.max(10, player.population.cap - 10),
-                        },
-                    };
-                    nextState.players = newPlayers;
-                }
-
-                return nextState;
+                return applyBuildingCollapse(state, id, originalBuilding, updatedBuilding, Date.now());
             }
 
             return { ...state, buildings: { ...state.buildings, [id]: updatedBuilding } };

@@ -204,9 +204,9 @@ export const InstancedRenderer: React.FC<{ gameState: GameState, selectedIds: Se
 
                 // Model Animation (relative to unit)
                 anim.modelPosition.set(0, 0, 0);
-                anim.modelQuaternion.set(0, 0, 0, 1);
                 
                 if(animationState !== AnimationState.DYING) {
+                    anim.modelQuaternion.set(0, 0, 0, 1);
                     switch (animationState) {
                         case AnimationState.WALKING:
                             anim.modelQuaternion.setFromEuler(new THREE.Euler(0, 0, Math.sin(state.clock.elapsedTime * 14) * 0.25));
@@ -226,6 +226,8 @@ export const InstancedRenderer: React.FC<{ gameState: GameState, selectedIds: Se
                             anim.modelPosition.z = Math.sin(buildProgress * Math.PI) * 0.3; // Hammering motion
                             break;
                     }
+                } else {
+                    // For dying units the model quaternion is driven by the death animation above.
                 }
                 
                 // Set matrix

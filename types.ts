@@ -209,6 +209,7 @@ export interface Unit extends BaseGameObject {
   deathTime?: number;
   // Worker task metadata
   workerOrder?: WorkerOrder;
+  suspendedWorkerOrder?: WorkerOrder;
 }
 
 export interface Building extends BaseGameObject {

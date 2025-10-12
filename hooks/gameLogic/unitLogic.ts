@@ -1,4 +1,4 @@
-import { GameState, UnitStatus, UnitType, Unit, GameObjectType, BuildingType, Building, ResourceNode, Vector3, UnitOrderType, UnitOrder } from '../../types';
+import { GameState, UnitStatus, UnitType, Unit, GameObjectType, BuildingType, Building, ResourceNode, Vector3, UnitOrderType, UnitOrder, WorkerOrder } from '../../types';
 import { UNIT_CONFIG, COLLISION_DATA, DEATH_ANIMATION_DURATION, arePlayersHostile } from '../../constants';
 import { BufferedDispatch } from '../../state/batch';
 import { NavMeshManager } from '../utils/navMeshManager';
@@ -23,6 +23,43 @@ const distanceSqXZ = (ax: number, az: number, bx: number, bz: number) => {
 };
 
 const copyVector = (vec: Vector3): Vector3 => ({ x: vec.x, y: vec.y, z: vec.z });
+
+const cloneWorkerOrder = (order: WorkerOrder): WorkerOrder => ({
+    ...order,
+    anchor: copyVector(order.anchor),
+});
+
+const prepareWorkerOrderForResume = (order: WorkerOrder, now: number): WorkerOrder => {
+    const base = cloneWorkerOrder(order);
+    switch (base.kind) {
+        case 'gather':
+            return {
+                ...base,
+                phase: 'travelToResource',
+                issuedAt: now,
+                lastProgressAt: now,
+                retries: 0,
+            };
+        case 'build':
+            return {
+                ...base,
+                phase: 'travelToSite',
+                issuedAt: now,
+                lastProgressAt: now,
+                retries: 0,
+            };
+        case 'repair':
+            return {
+                ...base,
+                phase: 'travelToTarget',
+                issuedAt: now,
+                lastProgressAt: now,
+                retries: 0,
+            };
+        default:
+            return base;
+    }
+};
 
 const hasReachedPoint = (unit: Unit, point: Vector3 | undefined, threshold = 1.5): boolean => {
     if (!point) return false;
@@ -431,19 +468,35 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                         distanceSqXZ(existingTarget.x, existingTarget.z, fleeTarget.x, fleeTarget.z) < 4;
 
                     if (!alreadyFleeing) {
+                        const nowMs = Date.now();
+                        const preservedOrder = unit.workerOrder
+                            ? prepareWorkerOrderForResume(unit.workerOrder, nowMs)
+                            : unit.suspendedWorkerOrder
+                            ? prepareWorkerOrderForResume(unit.suspendedWorkerOrder, nowMs)
+                            : undefined;
+
+                        const updatePayload: Partial<Unit> & { id: string } = {
+                            id: unit.id,
+                            status: UnitStatus.FLEEING,
+                            workerOrder: undefined,
+                            gatherTargetId: undefined,
+                            isHarvesting: false,
+                            harvestingResourceType: undefined,
+                            buildTask: undefined,
+                            repairTask: undefined,
+                            acquisitionCooldown: 1.5,
+                            gatherTimer: undefined,
+                            buildTimer: undefined,
+                            repairTimer: undefined,
+                        };
+
+                        if (preservedOrder) {
+                            updatePayload.suspendedWorkerOrder = preservedOrder;
+                        }
+
                         dispatch({
                             type: 'UPDATE_UNIT',
-                            payload: {
-                                id: unit.id,
-                                status: UnitStatus.FLEEING,
-                                workerOrder: undefined,
-                                gatherTargetId: undefined,
-                                isHarvesting: false,
-                                harvestingResourceType: undefined,
-                                buildTask: undefined,
-                                repairTask: undefined,
-                                acquisitionCooldown: 1.5,
-                            },
+                            payload: updatePayload,
                         });
 
                         dispatch({
@@ -459,11 +512,77 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                     }
 
                     continue;
-                } else if (unit.status === UnitStatus.FLEEING && (!unit.acquisitionCooldown || unit.acquisitionCooldown <= 0)) {
+                } else if (
+                    unit.status === UnitStatus.FLEEING &&
+                    (!unit.acquisitionCooldown || unit.acquisitionCooldown <= 0) &&
+                    !unit.threatTargetId
+                ) {
+                    const nowMs = Date.now();
+                    const suspendedOrder = unit.suspendedWorkerOrder
+                        ? prepareWorkerOrderForResume(unit.suspendedWorkerOrder, nowMs)
+                        : undefined;
+
+                    const resumePayload: Partial<Unit> & { id: string } = {
+                        id: unit.id,
+                        status: UnitStatus.IDLE,
+                        acquisitionCooldown: undefined,
+                        suspendedWorkerOrder: undefined,
+                        pathTarget: undefined,
+                        path: undefined,
+                        pathIndex: undefined,
+                        targetPosition: undefined,
+                        finalDestination: undefined,
+                    };
+
+                    if (suspendedOrder) {
+                        resumePayload.workerOrder = suspendedOrder;
+                        resumePayload.finalDestination = undefined;
+                        switch (suspendedOrder.kind) {
+                            case 'gather':
+                                resumePayload.gatherTargetId = suspendedOrder.resourceId;
+                                resumePayload.isHarvesting = true;
+                                resumePayload.harvestingResourceType = suspendedOrder.resourceType;
+                                resumePayload.buildTask = undefined;
+                                resumePayload.repairTask = undefined;
+                                resumePayload.gatherTimer = 0;
+                                resumePayload.buildTimer = undefined;
+                                resumePayload.repairTimer = undefined;
+                                break;
+                            case 'build':
+                                resumePayload.buildTask = { buildingId: suspendedOrder.buildingId, position: copyVector(suspendedOrder.anchor) };
+                                resumePayload.repairTask = undefined;
+                                resumePayload.isHarvesting = false;
+                                resumePayload.harvestingResourceType = undefined;
+                                resumePayload.buildTimer = 0;
+                                resumePayload.gatherTimer = undefined;
+                                resumePayload.repairTimer = undefined;
+                                break;
+                            case 'repair':
+                                resumePayload.repairTask = { buildingId: suspendedOrder.buildingId };
+                                resumePayload.buildTask = undefined;
+                                resumePayload.isHarvesting = false;
+                                resumePayload.harvestingResourceType = undefined;
+                                resumePayload.repairTimer = 0;
+                                resumePayload.buildTimer = undefined;
+                                resumePayload.gatherTimer = undefined;
+                                break;
+                        }
+                    } else {
+                        resumePayload.buildTask = undefined;
+                        resumePayload.repairTask = undefined;
+                        resumePayload.isHarvesting = false;
+                        resumePayload.harvestingResourceType = undefined;
+                        resumePayload.gatherTargetId = undefined;
+                        resumePayload.gatherTimer = undefined;
+                        resumePayload.buildTimer = undefined;
+                        resumePayload.repairTimer = undefined;
+                    }
+
                     dispatch({
                         type: 'UPDATE_UNIT',
-                        payload: { id: unit.id, status: UnitStatus.IDLE, acquisitionCooldown: undefined },
+                        payload: resumePayload,
                     });
+                    continue;
                 }
             }
         }
