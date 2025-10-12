@@ -111,10 +111,20 @@ const applyGenericUnitCommand = (
     if (target) {
         if (target.type === GameObjectType.BUILDING) {
             const building = target as Building;
-            const { approach, radius } = getBuildingApproach(unit, building, targetPosition);
-            nextPathTarget = approach;
-            interactionAnchor = approach;
-            interactionRadius = radius;
+            const isFriendlyStructure = building.playerId === unit.playerId;
+            const shouldApproachStructure = isFriendlyStructure || unit.unitType === UnitType.WORKER;
+
+            if (shouldApproachStructure) {
+                const { approach, radius } = getBuildingApproach(unit, building, targetPosition);
+                nextPathTarget = approach;
+                interactionAnchor = approach;
+                interactionRadius = radius;
+            } else {
+                const aimPoint = targetPosition ?? building.position;
+                nextPathTarget = aimPoint;
+                interactionAnchor = aimPoint;
+                interactionRadius = undefined;
+            }
         } else {
             if (targetPosition) {
                 nextPathTarget = targetPosition;

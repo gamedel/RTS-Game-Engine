@@ -485,7 +485,20 @@ export const processCombatLogic = (state: GameState, delta: number, dispatch: Bu
             let desiredAnchor: Vector3;
 
             if (activeTarget.type === GameObjectType.BUILDING) {
-                desiredAnchor = computeBuildingAnchor(unit, activeTarget as Building, preferredDistance);
+                if (weapon.style === 'projectile') {
+                    const safeDistance = Math.max(
+                        preferredDistance,
+                        targetRadius + attackerRadius + 1.2,
+                    );
+                    desiredAnchor = computeProjectileAnchor(
+                        unit,
+                        activeTarget,
+                        safeDistance,
+                        fallbackAnchor,
+                    );
+                } else {
+                    desiredAnchor = computeBuildingAnchor(unit, activeTarget as Building, preferredDistance);
+                }
             } else if (weapon.style === 'projectile') {
                 desiredAnchor = computeProjectileAnchor(unit, activeTarget, preferredDistance, fallbackAnchor);
             } else {
