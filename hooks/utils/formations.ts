@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { GameState, Unit, UnitStatus } from '../../types';
+import { GameState, Unit, UnitStatus, UnitOrderType } from '../../types';
 import { BufferedDispatch } from '../../state/batch';
 import { NavMeshManager } from './navMeshManager';
 
@@ -79,9 +79,11 @@ export function updateSquadFormations(state: GameState, dispatch: BufferedDispat
         type: 'COMMAND_UNIT',
         payload: {
           unitId: u.id,
+          orderType: UnitOrderType.MOVE,
           targetPosition: { x: slot.x, y: 0, z: slot.z },
           finalDestination: u.finalDestination,
           squadId: u.squadId,
+          source: 'auto',
         }
       });
     });

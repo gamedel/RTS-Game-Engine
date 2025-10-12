@@ -9,6 +9,7 @@ import {
     ResourceType,
     WorkerOrder,
     ResearchCategory,
+    UnitOrderType,
 } from '../../types';
 import {
     UNIT_CONFIG,
@@ -106,7 +107,14 @@ const reassignToNewResource = (state: GameState, unit: Unit, dispatch: BufferedD
 
     dispatch({
         type: 'COMMAND_UNIT',
-        payload: { unitId: unit.id, targetPosition: best.position, targetId: best.id },
+        payload: {
+            unitId: unit.id,
+            orderType: UnitOrderType.SMART,
+            targetPosition: best.position,
+            targetId: best.id,
+            finalDestination: best.position,
+            source: 'auto',
+        },
     });
     return true;
 };

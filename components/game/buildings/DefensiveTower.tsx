@@ -4,9 +4,11 @@ import { Box, Cylinder } from '@react-three/drei';
 import * as THREE from 'three';
 import { Building, GameState } from '../../../types';
 import { BuildingProgressBar } from '../scene/BuildingProgressBar';
+import { useBuildingCollapse } from './useBuildingCollapse';
 
 export const DefensiveTower: React.FC<{ object: Building; isSelected: boolean, gameState: GameState }> = ({ object, isSelected, gameState }) => {
     const groupRef = useRef<THREE.Group>(null!);
+    const collapseGroupRef = useBuildingCollapse(object);
     
     const progress = object.constructionProgress ?? 1;
     const modelHeight = 4; // Total height of the tower
@@ -27,33 +29,32 @@ export const DefensiveTower: React.FC<{ object: Building; isSelected: boolean, g
 
     return (
         <group position={[object.position.x, 0, object.position.z]}>
-            <BuildingProgressBar building={object} />
-            {/* Main structure that scales during construction */}
-            <group
-                ref={groupRef}
-                scale-y={Math.max(0.001, progress)}
-                position-y={progress * (modelHeight / 2)}
-            >
-                <Cylinder args={[1.2, 1.5, 3, 8]} castShadow receiveShadow>
-                     <meshStandardMaterial color={isSelected ? selectedColor : color} />
-                </Cylinder>
-                <Cylinder args={[1.8, 1.8, 1, 8]} position-y={1.5} castShadow receiveShadow>
-                     <meshStandardMaterial color={isSelected ? selectedColor : color} />
-                </Cylinder>
-                 <Box args={[2.2, 0.8, 2.2]} position-y={2.2} castShadow>
-                     <meshStandardMaterial color={isSelected ? '#b91c1c' : '#7f1d1d'} />
-                 </Box>
-            </group>
-
-            {/* Invisible clickbox to ensure the building is always selectable during construction */}
-            {progress < 1 && (
-                <Box 
-                    args={[2.5, modelHeight, 2.5]}
-                    position-y={modelHeight / 2} 
-                    visible={false}
+            {!object.isCollapsing && <BuildingProgressBar building={object} />}
+            <group ref={collapseGroupRef}>
+                <group
+                    ref={groupRef}
+                    scale-y={Math.max(0.001, progress)}
+                    position-y={progress * (modelHeight / 2)}
                 >
-                </Box>
-            )}
+                    <Cylinder args={[1.2, 1.5, 3, 8]} castShadow receiveShadow>
+                         <meshStandardMaterial color={isSelected ? selectedColor : color} />
+                    </Cylinder>
+                    <Cylinder args={[1.8, 1.8, 1, 8]} position-y={1.5} castShadow receiveShadow>
+                         <meshStandardMaterial color={isSelected ? selectedColor : color} />
+                    </Cylinder>
+                     <Box args={[2.2, 0.8, 2.2]} position-y={2.2} castShadow>
+                         <meshStandardMaterial color={isSelected ? '#b91c1c' : '#7f1d1d'} />
+                     </Box>
+                </group>
+
+                {progress < 1 && (
+                    <Box 
+                        args={[2.5, modelHeight, 2.5]}
+                        position-y={modelHeight / 2} 
+                        visible={false}
+                    />
+                )}
+            </group>
         </group>
     );
 }

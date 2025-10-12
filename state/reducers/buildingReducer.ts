@@ -188,12 +188,19 @@ export function buildingReducer(state: GameState, action: Action): GameState {
             if (!originalBuilding) return state;
             
             const updatedBuilding = { ...originalBuilding, ...rest };
+            if (typeof updatedBuilding.hp === 'number' && updatedBuilding.hp < 0) {
+                updatedBuilding.hp = 0;
+            }
 
             if (rest.hp !== undefined && rest.hp <= 0) {
-                const newBuildings = { ...state.buildings };
-                delete newBuildings[id];
+                if (originalBuilding.isCollapsing) {
+                    return {
+                        ...state,
+                        buildings: { ...state.buildings, [id]: { ...updatedBuilding, hp: 0 } },
+                    };
+                }
 
-                // If the building was fully constructed, remove its navmesh obstacle
+                const collapseStartedAt = Date.now();
                 if (originalBuilding.constructionProgress === undefined) {
                     NavMeshManager.removeObstacle(originalBuilding);
                 }
@@ -219,40 +226,112 @@ export function buildingReducer(state: GameState, action: Action): GameState {
                     }
                 });
 
-                const updatedBuildingState = { ...newBuildings };
-                 Object.keys(updatedBuildingState).forEach(bId => {
-                    const b = updatedBuildingState[bId];
+                const collapsingBuilding: Building = {
+                    ...updatedBuilding,
+                    hp: 0,
+                    isCollapsing: true,
+                    collapseStartedAt,
+                    targetId: undefined,
+                    trainingQueue: [],
+                    researchQueue: Array.isArray(updatedBuilding.researchQueue) ? [] : updatedBuilding.researchQueue,
+                    constructionProgress: undefined,
+                };
+
+                const buildingsSnapshot = { ...state.buildings, [id]: collapsingBuilding };
+                Object.keys(buildingsSnapshot).forEach(buildingId => {
+                    if (buildingId === id) return;
+                    const b = buildingsSnapshot[buildingId];
                     if (b.targetId === id) {
-                        updatedBuildingState[bId] = { ...b, targetId: undefined };
+                        buildingsSnapshot[buildingId] = { ...b, targetId: undefined };
                     }
                 });
-                
+
                 let nextState: GameState = {
                     ...state,
-                    buildings: updatedBuildingState,
+                    buildings: buildingsSnapshot,
                     units: updatedUnits,
                     selectedIds: state.selectedIds.filter(sid => sid !== id),
                 };
 
                 if (originalBuilding.buildingType === BuildingType.HOUSE && originalBuilding.constructionProgress === undefined) {
-                     const playerId = originalBuilding.playerId;
-                     const player = state.players[playerId];
-                     const newPlayers = [...state.players];
-                     newPlayers[playerId] = {
-                         ...player,
-                         population: {
+                    const playerId = originalBuilding.playerId;
+                    const player = state.players[playerId];
+                    const newPlayers = [...state.players];
+                    newPlayers[playerId] = {
+                        ...player,
+                        population: {
                             ...player.population,
-                            cap: Math.max(10, player.population.cap - 10)
-                         }
-                     };
-                     nextState.players = newPlayers;
+                            cap: Math.max(10, player.population.cap - 10),
+                        },
+                    };
+                    nextState.players = newPlayers;
                 }
-                
-                return nextState;
 
-            } else {
-                 return { ...state, buildings: { ...state.buildings, [id]: updatedBuilding } };
+                return nextState;
             }
+
+            return { ...state, buildings: { ...state.buildings, [id]: updatedBuilding } };
+        }
+        case 'REMOVE_BUILDING': {
+            const { id } = action.payload;
+            const building = state.buildings[id];
+            if (!building) return state;
+
+            const newBuildings = { ...state.buildings };
+            delete newBuildings[id];
+
+            NavMeshManager.removeObstacle(building);
+
+            const updatedUnits = { ...state.units };
+            Object.keys(updatedUnits).forEach(unitId => {
+                const unit = updatedUnits[unitId];
+                if (unit.targetId === id || unit.buildTask?.buildingId === id) {
+                    updatedUnits[unitId] = {
+                        ...unit,
+                        status: UnitStatus.IDLE,
+                        targetId: undefined,
+                        buildTask: undefined,
+                        repairTask: undefined,
+                        workerOrder: undefined,
+                        gatherTargetId: undefined,
+                        isHarvesting: false,
+                        harvestingResourceType: undefined,
+                        pathTarget: undefined,
+                        interactionAnchor: undefined,
+                        interactionRadius: undefined,
+                    };
+                }
+            });
+
+            Object.keys(newBuildings).forEach(buildingId => {
+                const other = newBuildings[buildingId];
+                if (other.targetId === id) {
+                    newBuildings[buildingId] = { ...other, targetId: undefined };
+                }
+            });
+
+            let nextState: GameState = {
+                ...state,
+                buildings: newBuildings,
+                units: updatedUnits,
+                selectedIds: state.selectedIds.filter(sid => sid !== id),
+            };
+
+            if (building.buildingType === BuildingType.HOUSE && building.constructionProgress === undefined) {
+                const playerId = building.playerId;
+                const player = state.players[playerId];
+                const newPlayers = [...state.players];
+                newPlayers[playerId] = {
+                    ...player,
+                    population: {
+                        ...player.population,
+                        cap: Math.max(10, player.population.cap - 10),
+                    },
+                };
+                nextState.players = newPlayers;
+            }
+
+            return nextState;
         }
         case 'CONTRIBUTE_TO_BUILDING': {
             const { buildingId, contribution } = action.payload;

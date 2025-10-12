@@ -9,8 +9,8 @@ export const processBuildingLogic = (state: GameState, delta: number, dispatch: 
     if (!buildings || !units) return;
 
     Object.values(buildings).forEach(building => {
-      // A building can only perform actions if it's not under construction.
-      if (building.constructionProgress !== undefined) return;
+      // A building can only perform actions if it's not under construction or collapsing.
+      if (building.constructionProgress !== undefined || building.isCollapsing) return;
       
       const owner = state.players[building.playerId];
 

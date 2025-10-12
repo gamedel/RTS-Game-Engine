@@ -49,6 +49,10 @@ export const BuildingProgressBar: React.FC<BuildingProgressBarProps> = ({ buildi
         color = '#3b82f6'; // blue-500
     }
 
+    if (building.isCollapsing) {
+        return null;
+    }
+
     if (progress <= 0 || progress >= 1 || building.constructionProgress !== undefined) {
         return null;
     }

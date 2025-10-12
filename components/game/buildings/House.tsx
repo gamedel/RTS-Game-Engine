@@ -3,9 +3,11 @@ import { useFrame } from '@react-three/fiber';
 import { Box } from '@react-three/drei';
 import * as THREE from 'three';
 import { Building, GameState } from '../../../types';
+import { useBuildingCollapse } from './useBuildingCollapse';
 
 export const House: React.FC<{ object: Building; isSelected: boolean, gameState: GameState }> = ({ object, isSelected, gameState }) => {
     const modelRef = useRef<THREE.Mesh>(null!);
+    const collapseGroupRef = useBuildingCollapse(object);
     
     const progress = object.constructionProgress ?? 1;
     const modelHeight = 2.5;
@@ -30,24 +32,26 @@ export const House: React.FC<{ object: Building; isSelected: boolean, gameState:
 
     return (
         <group position={[object.position.x, 0, object.position.z]}>
-            <Box
-                ref={modelRef}
-                args={[3, modelHeight, 3]}
-                scale-y={Math.max(0.001, progress)}
-                position-y={progress * (modelHeight / 2)}
-                castShadow
-                receiveShadow
-            >
-                <meshStandardMaterial color={isSelected ? selectedColor : color} metalness={0.1} roughness={0.7}/>
-            </Box>
+            <group ref={collapseGroupRef}>
+                <Box
+                    ref={modelRef}
+                    args={[3, modelHeight, 3]}
+                    scale-y={Math.max(0.001, progress)}
+                    position-y={progress * (modelHeight / 2)}
+                    castShadow
+                    receiveShadow
+                >
+                    <meshStandardMaterial color={isSelected ? selectedColor : color} metalness={0.1} roughness={0.7}/>
+                </Box>
 
-            {progress < 1 && (
-                <Box 
-                    args={[3, modelHeight, 3]} 
-                    position-y={modelHeight / 2} 
-                    visible={false}
-                />
-            )}
+                {progress < 1 && (
+                    <Box 
+                        args={[3, modelHeight, 3]} 
+                        position-y={modelHeight / 2} 
+                        visible={false}
+                    />
+                )}
+            </group>
         </group>
     );
 }

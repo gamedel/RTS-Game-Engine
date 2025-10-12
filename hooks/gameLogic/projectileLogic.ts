@@ -4,10 +4,13 @@ import { v4 as uuidv4 } from 'uuid';
 import { getDefenseBonus, arePlayersHostile, getBuildingCollisionMask } from '../../constants';
 import { SpatialHash } from '../utils/spatial';
 import { BufferedDispatch } from '../../state/batch';
+import { registerThreat } from './threatSystem';
 
 export const processProjectileLogic = (state: GameState, delta: number, dispatch: BufferedDispatch) => {
     const { projectiles, units, buildings } = state;
     if (!projectiles) return;
+
+    const now = performance.now();
 
     const targetGrid = new SpatialHash(5); // Cell size of 5 for efficient querying
     Object.values(units).forEach(u => targetGrid.insert(u.id, u.position.x, u.position.z));
@@ -89,6 +92,7 @@ export const processProjectileLogic = (state: GameState, delta: number, dispatch
                     dispatch({ type: 'UPDATE_BUILDING', payload: { id: target.id, hp: target.hp - damageDealt } });
                 } else {
                     dispatch({ type: 'UPDATE_UNIT', payload: { id: target.id, hp: target.hp - damageDealt } });
+                    registerThreat(state, dispatch, target as Unit, p.sourceId, now);
                 }
                 dispatch({ type: 'ADD_FLOATING_TEXT', payload: {
                     id: uuidv4(), text: `-${Math.floor(damageDealt)}`, resourceType: damageType,
@@ -129,6 +133,7 @@ export const processProjectileLogic = (state: GameState, delta: number, dispatch
                                 const finalDefense = unit.defense + getDefenseBonus(unit, unitOwner.research);
                                 const aoeDamage = Math.max(1, finalSplashDamage - finalDefense);
                                 dispatch({ type: 'UPDATE_UNIT', payload: { id: unit.id, hp: unit.hp - aoeDamage } });
+                                registerThreat(state, dispatch, unit, p.sourceId, now);
                                 dispatch({ type: 'ADD_FLOATING_TEXT', payload: {
                                     id: uuidv4(), text: `-${Math.floor(aoeDamage)}`, resourceType: damageType,
                                     position: { x: unit.position.x, y: 2.5, z: unit.position.z }, startTime: Date.now()

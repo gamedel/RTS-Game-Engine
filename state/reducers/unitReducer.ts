@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
-import { GameState, Action, Unit, GameObjectType, UnitType, UnitStatus, Building, ResourceNode, FloatingText, UnitStance, BuildingType, ResourceType, Vector3, ResearchCategory, WorkerOrder } from '../../types';
+import { GameState, Action, Unit, GameObjectType, UnitType, UnitStatus, Building, ResourceNode, FloatingText, UnitStance, BuildingType, ResourceType, Vector3, ResearchCategory, WorkerOrder, UnitOrderType, UnitOrder, UnitCommandSource } from '../../types';
 import { UNIT_CONFIG, COLLISION_DATA, RESEARCH_CONFIG } from '../../constants';
+import { AUTO_COMBAT_SQUAD_ID } from '../../hooks/gameLogic/threatSystem';
 import { computeBuildingApproachPoint } from '../../hooks/utils/buildingApproach';
 import { computeGatherAssignment } from '../../hooks/utils/gatherSlots';
 
@@ -19,6 +20,8 @@ const getBuildingApproach = (unit: Unit, building: Building, desired: Vector3 | 
     const radius = Math.hypot(approach.x - building.position.x, approach.z - building.position.z);
     return { approach, radius };
 };
+
+const cloneVector = (vec: Vector3): Vector3 => ({ x: vec.x, y: vec.y, z: vec.z });
 
 const resetWorkerState = (worker: Unit) => ({
     workerOrder: undefined,
@@ -113,7 +116,12 @@ const applyGenericUnitCommand = (
             interactionAnchor = approach;
             interactionRadius = radius;
         } else {
-            nextPathTarget = target.position;
+            if (targetPosition) {
+                nextPathTarget = targetPosition;
+                interactionAnchor = targetPosition;
+            } else {
+                nextPathTarget = target.position;
+            }
         }
     }
 
@@ -280,9 +288,21 @@ const resolveWorkerSpecialCommand = (
 export function unitReducer(state: GameState, action: Action): GameState {
     switch (action.type) {
         case 'COMMAND_UNIT': {
-            const { unitId, targetPosition, targetId, finalDestination } = action.payload;
+            const {
+                unitId,
+                orderType,
+                targetPosition,
+                targetId,
+                finalDestination,
+                squadId,
+                queue,
+                source,
+            } = action.payload;
             const unit = state.units[unitId];
             if (!unit) return state;
+            const behaviorConfig = UNIT_CONFIG[unit.unitType] as any;
+            const commandSource: UnitCommandSource = source ?? 'player';
+            const isAutoCommand = squadId === AUTO_COMBAT_SQUAD_ID || commandSource === 'auto';
 
             let targetObject: CommandTarget | null = null;
             if (targetId) {
@@ -310,24 +330,264 @@ export function unitReducer(state: GameState, action: Action): GameState {
                 };
             }
 
+            let effectiveType = orderType;
+            if (orderType === UnitOrderType.SMART) {
+                if (targetObject && (targetObject.type === GameObjectType.UNIT || targetObject.type === GameObjectType.BUILDING)) {
+                    if (targetObject.playerId !== undefined && targetObject.playerId !== unit.playerId) {
+                        effectiveType = UnitOrderType.ATTACK_TARGET;
+                    } else {
+                        effectiveType = UnitOrderType.MOVE;
+                    }
+                } else {
+                    effectiveType = UnitOrderType.MOVE;
+                }
+            }
+
             const now = Date.now();
+            const order: UnitOrder = {
+                id: uuidv4(),
+                type: effectiveType,
+                source: commandSource,
+                issuedAt: now,
+                targetId,
+                point: targetPosition,
+                guardPoint: finalDestination,
+                queue: !!queue,
+                metadata: squadId ? { squadId } : undefined,
+            };
+
+            if (effectiveType === UnitOrderType.PATROL) {
+                order.guardPoint = cloneVector(unit.guardPosition ?? unit.position);
+                order.point =
+                    order.point ??
+                    (targetPosition ? cloneVector(targetPosition) : finalDestination ? cloneVector(finalDestination) : undefined);
+                order.metadata = {
+                    ...(order.metadata ?? {}),
+                    patrolStage: 'outbound',
+                };
+            }
+
+            const computePatrolRoute = (): Unit['patrolRoute'] | undefined => {
+                if (effectiveType === UnitOrderType.PATROL) {
+                    const originBase = order.guardPoint ?? cloneVector(unit.guardPosition ?? unit.position);
+                    const destinationBase =
+                        order.point ??
+                        (targetPosition
+                            ? cloneVector(targetPosition)
+                            : finalDestination
+                                ? cloneVector(finalDestination)
+                                : cloneVector(unit.position));
+                    return {
+                        origin: cloneVector(originBase),
+                        destination: cloneVector(destinationBase),
+                        stage: 'outbound',
+                    };
+                }
+                if (!isAutoCommand) {
+                    return undefined;
+                }
+                return unit.patrolRoute;
+            };
+
+            const nextPatrolRoute = computePatrolRoute();
+
+            if (queue && unit.currentOrder && effectiveType !== UnitOrderType.STOP) {
+                const existingQueue = unit.orderQueue ? [...unit.orderQueue, order] : [order];
+                return {
+                    ...state,
+                    units: {
+                        ...state.units,
+                        [unitId]: {
+                            ...unit,
+                            orderQueue: existingQueue,
+                            lastOrderIssuedAt: now,
+                        },
+                    },
+                };
+            }
+
             const updatedUnits = { ...state.units };
 
-            if (unit.unitType === UnitType.WORKER) {
-                const handled = resolveWorkerSpecialCommand(state, unit, targetObject, targetPosition, now);
-                if (handled) {
-                    updatedUnits[unitId] = handled;
-                    return { ...state, units: updatedUnits };
-                }
+            const clearThreatFields = isAutoCommand
+                ? {}
+                : {
+                    threatTargetId: undefined,
+                    threatExpireAt: undefined,
+                    recentAttackerId: undefined,
+                    lastThreatTime: undefined,
+                };
 
-                const generic = applyGenericUnitCommand(state, unit, targetObject, targetPosition, finalDestination);
-                updatedUnits[unitId] = stripWorkerOrders(generic);
+            if (effectiveType === UnitOrderType.STOP) {
+                const cleared = unit.unitType === UnitType.WORKER ? stripWorkerOrders(unit) : unit;
+                updatedUnits[unitId] = {
+                    ...cleared,
+                    ...clearThreatFields,
+                    status: UnitStatus.IDLE,
+                    targetId: undefined,
+                    targetPosition: undefined,
+                    path: undefined,
+                    pathIndex: undefined,
+                    pathTarget: undefined,
+                    finalDestination: undefined,
+                    squadId: squadId ?? cleared.squadId,
+                    currentOrder: undefined,
+                    orderQueue: undefined,
+                    lastOrderIssuedAt: now,
+                    guardPosition: cloneVector(cleared.position),
+                    guardReturnRadius: behaviorConfig?.guardDistance ?? Math.max(cleared.attackRange + 2, 4),
+                    guardPursuitRadius: behaviorConfig?.guardDistance ?? Math.max(cleared.attackRange + 2, 4),
+                    isReturningToGuard: false,
+                    acquisitionCooldown: isAutoCommand ? cleared.acquisitionCooldown : undefined,
+                    patrolRoute: undefined,
+                };
                 return { ...state, units: updatedUnits };
             }
 
-            const updatedUnit = applyGenericUnitCommand(state, unit, targetObject, targetPosition, finalDestination);
-            updatedUnits[unitId] = updatedUnit;
-            return { ...state, units: updatedUnits };
+            if (effectiveType === UnitOrderType.HOLD_POSITION) {
+                const cleared = unit.unitType === UnitType.WORKER ? stripWorkerOrders(unit) : unit;
+                const holdUnit: Unit = {
+                    ...cleared,
+                    status: UnitStatus.IDLE,
+                    targetId: undefined,
+                    targetPosition: undefined,
+                    path: undefined,
+                    pathIndex: undefined,
+                    pathTarget: undefined,
+                    finalDestination: undefined,
+                    stance: UnitStance.HOLD_GROUND,
+                };
+                updatedUnits[unitId] = {
+                    ...holdUnit,
+                    ...clearThreatFields,
+                    squadId: squadId ?? holdUnit.squadId,
+                    guardPosition: cloneVector(holdUnit.position),
+                    guardReturnRadius: behaviorConfig?.guardDistance ?? Math.max(holdUnit.attackRange + 2, 4),
+                    guardPursuitRadius: behaviorConfig?.guardDistance ?? Math.max(holdUnit.attackRange + 2, 4),
+                    isReturningToGuard: false,
+                    acquisitionCooldown: isAutoCommand ? holdUnit.acquisitionCooldown : undefined,
+                    currentOrder: order,
+                    orderQueue: undefined,
+                    lastOrderIssuedAt: now,
+                    patrolRoute: isAutoCommand ? unit.patrolRoute : undefined,
+                };
+                return { ...state, units: updatedUnits };
+            }
+
+            let workerOverride: Unit | null = null;
+            let workingUnit: Unit = unit;
+
+            if (unit.unitType === UnitType.WORKER) {
+                const workerEligible =
+                    effectiveType === UnitOrderType.MOVE ||
+                    effectiveType === UnitOrderType.SMART ||
+                    effectiveType === UnitOrderType.ATTACK_MOVE ||
+                    effectiveType === UnitOrderType.PATROL;
+                if (workerEligible) {
+                    const handled = resolveWorkerSpecialCommand(state, unit, targetObject, targetPosition, now);
+                    if (handled) {
+                        workerOverride = handled;
+                    } else {
+                        workingUnit = stripWorkerOrders(unit);
+                    }
+                } else {
+                    workingUnit = stripWorkerOrders(unit);
+                }
+            }
+
+            const finalizeUnit = (base: Unit): GameState => {
+                const baseGuardPosition = base.guardPosition ?? unit.guardPosition ?? unit.position;
+                const guardReturnRadius =
+                    base.guardReturnRadius ??
+                    unit.guardReturnRadius ??
+                    behaviorConfig?.guardDistance ??
+                    Math.max(unit.attackRange + 2, 4);
+                const guardPursuitRadius =
+                    base.guardPursuitRadius ??
+                    unit.guardPursuitRadius ??
+                    behaviorConfig?.pursuitDistance ??
+                    guardReturnRadius + 6;
+
+                let nextGuardPosition = baseGuardPosition;
+                if (!isAutoCommand) {
+                    if (effectiveType === UnitOrderType.PATROL && order.guardPoint) {
+                        nextGuardPosition = order.guardPoint;
+                    } else if (finalDestination) {
+                        nextGuardPosition = finalDestination;
+                    } else if (!targetId && targetPosition && effectiveType !== UnitOrderType.PATROL) {
+                        nextGuardPosition = targetPosition;
+                    }
+                }
+
+                updatedUnits[unitId] = {
+                    ...base,
+                    ...clearThreatFields,
+                    squadId: squadId ?? base.squadId ?? unit.squadId,
+                    guardPosition: cloneVector(nextGuardPosition),
+                    guardReturnRadius,
+                    guardPursuitRadius,
+                    isReturningToGuard: false,
+                    acquisitionCooldown: isAutoCommand ? base.acquisitionCooldown : undefined,
+                    currentOrder: order,
+                    orderQueue: undefined,
+                    lastOrderIssuedAt: now,
+                    patrolRoute: nextPatrolRoute,
+                };
+
+                return { ...state, units: updatedUnits };
+            };
+
+            if (workerOverride) {
+                return finalizeUnit(workerOverride);
+            }
+
+            let destination = targetPosition ?? finalDestination;
+            if (
+                (effectiveType === UnitOrderType.MOVE ||
+                    effectiveType === UnitOrderType.ATTACK_MOVE ||
+                    effectiveType === UnitOrderType.PATROL) &&
+                !destination &&
+                targetObject &&
+                targetObject.type !== GameObjectType.RESOURCE
+            ) {
+                destination = cloneVector(targetObject.position);
+            }
+
+            if (
+                (effectiveType === UnitOrderType.MOVE ||
+                    effectiveType === UnitOrderType.ATTACK_MOVE ||
+                    effectiveType === UnitOrderType.PATROL) &&
+                !destination
+            ) {
+                return state;
+            }
+
+            let commandTarget: CommandTarget | null = targetObject;
+            let requestedFinal = finalDestination;
+
+            if (effectiveType === UnitOrderType.ATTACK_MOVE || effectiveType === UnitOrderType.PATROL) {
+                commandTarget = null;
+                if (!requestedFinal && destination) {
+                    requestedFinal = destination;
+                }
+            }
+
+            if (!requestedFinal && destination && effectiveType === UnitOrderType.MOVE) {
+                requestedFinal = destination;
+            }
+
+            const computedUnit = applyGenericUnitCommand(
+                state,
+                workingUnit,
+                commandTarget,
+                destination,
+                requestedFinal,
+            );
+
+            if (effectiveType === UnitOrderType.PATROL && order.guardPoint) {
+                computedUnit.guardPosition = cloneVector(order.guardPoint);
+            }
+
+            return finalizeUnit(computedUnit);
         }
         case 'WORKER_FINISH_DROPOFF': {
             const { workerId } = action.payload;
@@ -489,6 +749,9 @@ export function unitReducer(state: GameState, action: Action): GameState {
             
             const config = UNIT_CONFIG[unit.unitType];
             const isCombatUnit = unit.unitType !== UnitType.WORKER;
+            const defaultGuardReturn = config.guardDistance ?? Math.max(config.attackRange + 2, 4);
+            const defaultGuardPursuit = config.pursuitDistance ?? (defaultGuardReturn + 6);
+            const spawnPosition = unit.position ?? { x: 0, y: 0, z: 0 };
 
             const completeUnit: Unit = {
                 ...(unit as Unit),
@@ -501,6 +764,10 @@ export function unitReducer(state: GameState, action: Action): GameState {
                 stance: isCombatUnit ? UnitStance.AGGRESSIVE : UnitStance.HOLD_GROUND,
                 isHarvesting: false,
                 harvestingResourceType: undefined,
+                guardPosition: unit.guardPosition ?? spawnPosition,
+                guardReturnRadius: unit.guardReturnRadius ?? defaultGuardReturn,
+                guardPursuitRadius: unit.guardPursuitRadius ?? defaultGuardPursuit,
+                isReturningToGuard: unit.isReturningToGuard ?? false,
             };
             
             const player = state.players[playerId];
@@ -533,6 +800,8 @@ export function unitReducer(state: GameState, action: Action): GameState {
                 y: 0,
                 z: building.position.z + spawnZOffset,
             };
+            const spawnGuardReturn = config.guardDistance ?? Math.max(config.attackRange + 2, 4);
+            const spawnGuardPursuit = config.pursuitDistance ?? (spawnGuardReturn + 6);
 
             const completeUnit: Unit = {
                 id: newUnitId,
@@ -550,6 +819,10 @@ export function unitReducer(state: GameState, action: Action): GameState {
                 stance: isCombatUnit ? UnitStance.AGGRESSIVE : UnitStance.HOLD_GROUND,
                 isHarvesting: false,
                 harvestingResourceType: undefined,
+                guardPosition: spawnPosition,
+                guardReturnRadius: spawnGuardReturn,
+                guardPursuitRadius: spawnGuardPursuit,
+                isReturningToGuard: false,
             };
             
             if (building.rallyPoint) {
@@ -558,6 +831,7 @@ export function unitReducer(state: GameState, action: Action): GameState {
                 if (isCombatUnit) {
                     completeUnit.finalDestination = building.rallyPoint;
                 }
+                completeUnit.guardPosition = { ...building.rallyPoint };
             } else {
                 // No rally point, give a small move-out command to clear the spawn area
                 completeUnit.status = UnitStatus.MOVING;
@@ -605,6 +879,8 @@ export function unitReducer(state: GameState, action: Action): GameState {
                     y: 0,
                     z: position.z + Math.sin(angle) * radius,
                 };
+                const debugGuardReturn = config.guardDistance ?? Math.max(config.attackRange + 2, 4);
+                const debugGuardPursuit = config.pursuitDistance ?? (debugGuardReturn + 6);
 
                 const newUnitId = uuidv4();
                 const completeUnit: Unit = {
@@ -623,6 +899,10 @@ export function unitReducer(state: GameState, action: Action): GameState {
                     stance: isCombatUnit ? UnitStance.AGGRESSIVE : UnitStance.HOLD_GROUND,
                     isHarvesting: false,
                     harvestingResourceType: undefined,
+                    guardPosition: spawnPosition,
+                    guardReturnRadius: debugGuardReturn,
+                    guardPursuitRadius: debugGuardPursuit,
+                    isReturningToGuard: false,
                 };
                 newUnits[newUnitId] = completeUnit;
             }

@@ -14,13 +14,13 @@ const geometries = {
     [UnitType.ARCHER]: new THREE.ConeGeometry(0.5, 1.4, 8),
     [UnitType.CAVALRY]: new THREE.BoxGeometry(0.6, 0.8, 1.6), // Simplified horse body
     [UnitType.CATAPULT]: new THREE.BoxGeometry(1.5, 0.6, 2.0), // Simplified catapult body
-    selectionRing: new THREE.TorusGeometry(1.2, 0.1, 16, 100),
+    selectionRing: new THREE.RingGeometry(0.9, 1.05, 32),
     healthBar: new THREE.PlaneGeometry(1, 1),
 };
 
 const materials = {
     unit: new THREE.MeshStandardMaterial({ metalness: 0.3, roughness: 0.4 }),
-    selectionRing: new THREE.MeshBasicMaterial({ toneMapped: false }),
+    selectionRing: new THREE.MeshBasicMaterial({ toneMapped: false, side: THREE.DoubleSide }),
     healthBarBg: new THREE.MeshBasicMaterial({ color: '#3f3f46', toneMapped: false }),
     healthBarPlayer: new THREE.MeshBasicMaterial({ color: '#22c55e', toneMapped: false }),
     healthBarEnemy: new THREE.MeshBasicMaterial({ color: '#ef4444', toneMapped: false }),
@@ -88,6 +88,23 @@ export const InstancedRenderer: React.FC<{ gameState: GameState, selectedIds: Se
         modelPosition: THREE.Vector3,
         modelQuaternion: THREE.Quaternion,
     }>()).current;
+    const deathOrientationMap = useRef(new Map<string, { axis: THREE.Vector3; direction: number }>()).current;
+
+    const getDeathOrientation = (unit: Unit) => {
+        let orient = deathOrientationMap.get(unit.id);
+        if (!orient) {
+            let hash = 0;
+            for (let i = 0; i < unit.id.length; i++) {
+                hash = (hash * 31 + unit.id.charCodeAt(i)) | 0;
+            }
+            const angle = ((hash >>> 0) % 360) * (Math.PI / 180);
+            const direction = ((hash >>> 8) & 1) === 0 ? 1 : -1;
+            const axis = new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle));
+            orient = { axis, direction };
+            deathOrientationMap.set(unit.id, orient);
+        }
+        return orient;
+    };
     
     const unitsByType = useMemo(() => {
         const result = {
@@ -117,6 +134,8 @@ export const InstancedRenderer: React.FC<{ gameState: GameState, selectedIds: Se
 
     useFrame((state, delta) => {
         const dt = Math.min(delta, 0.1);
+        const humanPlayer = gameState.players.find(p => p.isHuman);
+        const humanTeamId = humanPlayer?.teamId;
 
         // --- Update All Units ---
         Object.entries(unitsByType).forEach(([type, units]) => {
@@ -139,21 +158,22 @@ export const InstancedRenderer: React.FC<{ gameState: GameState, selectedIds: Se
                 if (animationState === AnimationState.DYING) {
                     const deathTime = unit.deathTime || 0;
                     const elapsedTime = Date.now() - deathTime;
-                    const progress = Math.min(elapsedTime / DEATH_ANIMATION_DURATION, 1);
-                    
-                    const FALL_DURATION = 800;
-                    const SINK_DURATION = DEATH_ANIMATION_DURATION - FALL_DURATION;
+                    const FALL_DURATION = 900;
+                    const SINK_DURATION = Math.max(400, DEATH_ANIMATION_DURATION - FALL_DURATION);
+                    const { axis: fallAxis, direction: fallDirection } = getDeathOrientation(unit);
+                    const fallAngle = fallDirection * (Math.PI / 2);
 
                     if (elapsedTime <= FALL_DURATION) {
                         const fallProgress = elapsedTime / FALL_DURATION;
-                        anim.modelQuaternion.setFromEuler(new THREE.Euler(0, 0, THREE.MathUtils.lerp(0, Math.PI / 2, fallProgress)));
+                        anim.modelQuaternion.setFromAxisAngle(fallAxis, fallAngle * fallProgress);
                     } else {
-                        anim.modelQuaternion.setFromEuler(new THREE.Euler(0, 0, Math.PI / 2));
-                        const sinkProgress = (elapsedTime - FALL_DURATION) / SINK_DURATION;
-                        anim.position.y = THREE.MathUtils.lerp(0, -1.5, sinkProgress);
+                        anim.modelQuaternion.setFromAxisAngle(fallAxis, fallAngle);
+                        const sinkProgress = Math.min((elapsedTime - FALL_DURATION) / SINK_DURATION, 1);
+                        anim.position.y = THREE.MathUtils.lerp(0, -2.4, sinkProgress);
                     }
                 } else {
                     anim.position.y = 0; // Ensure alive units are on the ground
+                    deathOrientationMap.delete(unit.id);
                 }
 
                 // Position Interpolation
@@ -230,7 +250,7 @@ export const InstancedRenderer: React.FC<{ gameState: GameState, selectedIds: Se
         // --- Update Selection Rings ---
         if (selectionRingMesh.current) {
             selectedObjects.forEach((obj, i) => {
-                let scale = 1.2;
+                let scale = 1.25;
                 if (obj.type === GameObjectType.BUILDING) {
                     const size = COLLISION_DATA.BUILDINGS[obj.buildingType];
                     scale = Math.max(size.width, size.depth) * 0.7;
@@ -243,7 +263,15 @@ export const InstancedRenderer: React.FC<{ gameState: GameState, selectedIds: Se
                 tempObject.updateMatrix();
                 selectionRingMesh.current!.setMatrixAt(i, tempObject.matrix);
                 const owner = gameState.players[obj.playerId!];
-                selectionRingMesh.current!.setColorAt(i, tempColor.set(owner?.isHuman ? '#ffff00' : '#ef4444'));
+                let ringColor = '#ff4f4f';
+                if (owner) {
+                    if (humanPlayer && owner.id === humanPlayer.id) {
+                        ringColor = '#32ff6e';
+                    } else if (humanTeamId && owner.teamId === humanTeamId && owner.id !== humanPlayer?.id) {
+                        ringColor = '#ffd966';
+                    }
+                }
+                selectionRingMesh.current!.setColorAt(i, tempColor.set(ringColor));
             });
             selectionRingMesh.current.instanceMatrix.needsUpdate = true;
             if(selectionRingMesh.current.instanceColor) selectionRingMesh.current.instanceColor.needsUpdate = true;
@@ -279,6 +307,13 @@ export const InstancedRenderer: React.FC<{ gameState: GameState, selectedIds: Se
             healthBarFgMesh.current.instanceMatrix.needsUpdate = true;
             if(healthBarFgMesh.current.instanceColor) healthBarFgMesh.current.instanceColor.needsUpdate = true;
         }
+
+        deathOrientationMap.forEach((_, unitId) => {
+            const tracked = gameState.units[unitId];
+            if (!tracked || !tracked.isDying) {
+                deathOrientationMap.delete(unitId);
+            }
+        });
 
     });
     

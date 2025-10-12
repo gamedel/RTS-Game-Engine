@@ -1,6 +1,6 @@
 import React from 'react';
 import { GameState, Action, UnitType, BuildingType } from '../../types';
-import { GoldIcon, WoodIcon, PopulationIcon, DebugIcon, CavalryIcon } from './Icons';
+import { GoldIcon, WoodIcon, PopulationIcon, DebugIcon, UnitTypeIcon } from './Icons';
 import { useLocalization } from '../../hooks/useLocalization';
 
 export const ResourceBar: React.FC<{ gameState: GameState, dispatch: React.Dispatch<Action>, fps: number, isTouchDevice: boolean }> = ({ gameState, dispatch, fps, isTouchDevice }) => {
@@ -30,6 +30,27 @@ export const ResourceBar: React.FC<{ gameState: GameState, dispatch: React.Dispa
         ? 'px-4 h-11 bg-slate-700/80 hover:bg-slate-600/80 rounded-lg text-white font-semibold text-base ring-1 ring-slate-500 transition-all active:scale-95'
         : 'px-4 h-8 bg-slate-700/80 hover:bg-slate-600/80 rounded-md text-white font-bold text-sm ring-1 ring-slate-500 transition-all';
 
+    const debugSpawnOptions: Array<{ type: UnitType; count: number; title: string }> = [
+        { type: UnitType.WORKER, count: 6, title: 'Debug: Spawn 6 Workers' },
+        { type: UnitType.INFANTRY, count: 12, title: 'Debug: Spawn 12 Infantry' },
+        { type: UnitType.ARCHER, count: 12, title: 'Debug: Spawn 12 Archers' },
+        { type: UnitType.CAVALRY, count: 12, title: 'Debug: Spawn 12 Cavalry' },
+        { type: UnitType.CATAPULT, count: 4, title: 'Debug: Spawn 4 Catapults' },
+    ];
+
+    const handleDebugSpawn = (unitType: UnitType, count: number) => {
+        if (!humanTownHall) return;
+        dispatch({
+            type: 'DEBUG_SPAWN_UNITS',
+            payload: {
+                playerId: humanPlayer.id,
+                unitType,
+                count,
+                position: humanTownHall.position,
+            }
+        });
+    };
+
     return (
         <div className={containerClasses}>
             <div className={resourceLayoutClasses}>
@@ -56,26 +77,19 @@ export const ResourceBar: React.FC<{ gameState: GameState, dispatch: React.Dispa
                         >
                             <DebugIcon />
                         </button>
-                        <button
-                            onClick={() => {
-                                if (humanTownHall) {
-                                    dispatch({
-                                        type: 'DEBUG_SPAWN_UNITS',
-                                        payload: {
-                                            playerId: humanPlayer.id,
-                                            unitType: UnitType.CAVALRY,
-                                            count: 20,
-                                            position: humanTownHall.position,
-                                        }
-                                    });
-                                }
-                            }}
-                            disabled={!humanTownHall}
-                            className="p-1.5 bg-slate-700/80 hover:bg-slate-600/80 rounded-full text-slate-300 hover:text-white transition-colors ring-1 ring-slate-600 disabled:bg-slate-800 disabled:cursor-not-allowed"
-                            title="Debug: Spawn 20 Cavalry"
-                        >
-                            <CavalryIcon style={{ width: '20px', height: '20px' }} />
-                        </button>
+                        <div className="flex items-center gap-1">
+                            {debugSpawnOptions.map(option => (
+                                <button
+                                    key={option.type}
+                                    onClick={() => handleDebugSpawn(option.type, option.count)}
+                                    disabled={!humanTownHall}
+                                    className="p-1.5 bg-slate-700/80 hover:bg-slate-600/80 rounded-full text-slate-300 hover:text-white transition-colors ring-1 ring-slate-600 disabled:bg-slate-800 disabled:cursor-not-allowed"
+                                    title={option.title}
+                                >
+                                    <UnitTypeIcon type={option.type} style={{ width: '20px', height: '20px' }} />
+                                </button>
+                            ))}
+                        </div>
                     </div>
                 )}
             </div>

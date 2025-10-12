@@ -2,11 +2,84 @@ import { GameState, UnitType, BuildingType, GameObjectType, ResourceType, UnitSt
 import { v4 as uuidv4 } from 'uuid';
 
 export const UNIT_CONFIG = {
-  [UnitType.WORKER]: { cost: { gold: 50, wood: 0 }, hp: 50, speed: 5, gatherAmount: 10, gatherTime: 0.5, carryCapacity: 10, attackDamage: 0, attackSpeed: 1, attackRange: 1.5, defense: 0, aggroRange: 0 },
-  [UnitType.INFANTRY]: { cost: { gold: 75, wood: 25 }, hp: 100, speed: 4, attackDamage: 12, attackSpeed: 1.2, attackRange: 1.8, defense: 1, aggroRange: 10 },
-  [UnitType.ARCHER]: { cost: { gold: 50, wood: 50 }, hp: 70, speed: 4.5, attackDamage: 8, attackSpeed: 1, attackRange: 10, defense: 0, aggroRange: 12 },
-  [UnitType.CAVALRY]: { cost: { gold: 100, wood: 40 }, hp: 120, speed: 6, attackDamage: 15, attackSpeed: 1.0, attackRange: 2.0, defense: 1, aggroRange: 11 },
-  [UnitType.CATAPULT]: { cost: { gold: 150, wood: 150 }, hp: 80, speed: 3, attackDamage: 20, attackSpeed: 0.3, attackRange: 15, defense: 0, aggroRange: 16 },
+  [UnitType.WORKER]: {
+    cost: { gold: 50, wood: 0 },
+    hp: 50,
+    speed: 5,
+    gatherAmount: 10,
+    gatherTime: 0.5,
+    carryCapacity: 10,
+    attackDamage: 0,
+    attackSpeed: 1,
+    attackRange: 1.5,
+    defense: 0,
+    aggroRange: 0,
+    guardDistance: 4,
+    pursuitDistance: 6,
+    assistRadius: 6,
+    threatDecay: 4,
+    fleeRadius: 8,
+  },
+  [UnitType.INFANTRY]: {
+    cost: { gold: 75, wood: 25 },
+    hp: 100,
+    speed: 4,
+    attackDamage: 12,
+    attackSpeed: 1.2,
+    attackRange: 1.8,
+    defense: 1,
+    aggroRange: 10,
+    guardDistance: 6,
+    pursuitDistance: 14,
+    assistRadius: 8,
+    threatDecay: 6,
+    fleeRadius: 0,
+  },
+  [UnitType.ARCHER]: {
+    cost: { gold: 50, wood: 50 },
+    hp: 70,
+    speed: 4.5,
+    attackDamage: 8,
+    attackSpeed: 1,
+    attackRange: 12,
+    defense: 0,
+    aggroRange: 14,
+    guardDistance: 7,
+    pursuitDistance: 18,
+    assistRadius: 10,
+    threatDecay: 6,
+    fleeRadius: 0,
+  },
+  [UnitType.CAVALRY]: {
+    cost: { gold: 100, wood: 40 },
+    hp: 120,
+    speed: 6,
+    attackDamage: 15,
+    attackSpeed: 1.0,
+    attackRange: 2.0,
+    defense: 1,
+    aggroRange: 11,
+    guardDistance: 7,
+    pursuitDistance: 18,
+    assistRadius: 8,
+    threatDecay: 6,
+    fleeRadius: 0,
+  },
+  [UnitType.CATAPULT]: {
+    cost: { gold: 150, wood: 150 },
+    hp: 80,
+    speed: 3,
+    attackDamage: 20,
+    attackSpeed: 0.3,
+    attackRange: 18,
+    defense: 0,
+    aggroRange: 20,
+    guardDistance: 9,
+    pursuitDistance: 22,
+    assistRadius: 13,
+    threatDecay: 8,
+    fleeRadius: 0,
+  },
 };
 
 export const BUILDING_CONFIG = {
@@ -96,6 +169,8 @@ export const RESOURCE_NODE_INTERACTION_RADIUS: Record<ResourceType, number> = {
 export const COMMAND_MARKER_DURATION = 750; // ms
 export const EXPLOSION_MARKER_DURATION = 500; // ms
 export const DEATH_ANIMATION_DURATION = 2500; // ms
+export const BUILDING_COLLAPSE_DURATION = 2400; // ms
+export const BUILDING_COLLAPSE_SINK_DEPTH = 3.5;
 export const GOLD_MINE_DEPLETE_DURATION = 2000; // ms
 export const PLAYER_COLORS = ['#38bdf8', '#f87171', '#facc15', '#a3e635']; // Blue, Red, Yellow, Green
 
@@ -287,12 +362,18 @@ export const createInitialGameState = (mapType: MapType = 'default', playersSetu
 
         for (let j = 0; j < (isHuman ? 2 : 3); j++) {
             const workerId = uuidv4();
+            const spawnPosition = { x: startPos.x - 5 + (j * 5), y: 0, z: startPos.z + 5 };
+            const workerGuardReturn = workerConfig.guardDistance ?? 4;
+            const workerGuardPursuit = workerConfig.pursuitDistance ?? (workerGuardReturn + 6);
             units[workerId] = {
                 id: workerId, type: GameObjectType.UNIT, unitType: UnitType.WORKER, playerId: i,
-                position: { x: startPos.x - 5 + (j * 5), y: 0, z: startPos.z + 5 },
+                position: spawnPosition,
                 status: UnitStatus.IDLE, hp: workerConfig.hp, maxHp: workerConfig.hp,
                 attackDamage: workerConfig.attackDamage, attackSpeed: workerConfig.attackSpeed, attackRange: workerConfig.attackRange,
-                defense: workerConfig.defense, stance: UnitStance.HOLD_GROUND, isHarvesting: false
+                defense: workerConfig.defense, stance: UnitStance.HOLD_GROUND, isHarvesting: false,
+                guardPosition: spawnPosition,
+                guardReturnRadius: workerGuardReturn,
+                guardPursuitRadius: workerGuardPursuit,
             };
         }
 

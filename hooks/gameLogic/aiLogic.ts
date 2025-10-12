@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { GameState, Action, UnitStatus, UnitType, BuildingType, Unit, Vector3, Building, ResourceNode, ResourceType, ResearchCategory, Player, AIState } from '../../types';
+import { GameState, Action, UnitStatus, UnitType, BuildingType, Unit, Vector3, Building, ResourceNode, ResourceType, ResearchCategory, Player, AIState, UnitOrderType } from '../../types';
 import { BUILDING_CONFIG, UNIT_CONFIG, RESEARCH_CONFIG, arePlayersHostile } from '../../constants';
 import { checkPlacementCollision } from '../../components/game/scene/Ground';
 import { BufferedDispatch } from '../../state/batch';
@@ -223,7 +223,17 @@ const processSingleAiLogic = (
                 if (closestThreat && new THREE.Vector3(worker.position.x, 0, worker.position.z).distanceToSquared(new THREE.Vector3(closestThreat.position.x, 0, closestThreat.position.z)) < WORKER_FLEE_RANGE_SQ) {
                     const fleeTarget = findClosestTarget(worker.position, myDropOffs);
                     if (fleeTarget) {
-                        dispatch({ type: 'COMMAND_UNIT', payload: { unitId: worker.id, targetPosition: fleeTarget.position, targetId: fleeTarget.id } });
+                        dispatch({
+                            type: 'COMMAND_UNIT',
+                            payload: {
+                                unitId: worker.id,
+                                orderType: UnitOrderType.SMART,
+                                targetPosition: fleeTarget.position,
+                                targetId: fleeTarget.id,
+                                finalDestination: fleeTarget.position,
+                                source: 'ai',
+                            },
+                        });
                         dispatch({ type: 'UPDATE_UNIT', payload: { id: worker.id, status: UnitStatus.FLEEING } });
                     }
                 }
@@ -242,8 +252,18 @@ const processSingleAiLogic = (
             const availableDefenders = myUnits.filter(u => u.unitType !== UnitType.WORKER && (u.status === UnitStatus.IDLE || (u.status === UnitStatus.MOVING && !u.targetId)));
             if (availableDefenders.length > 0) {
                 const closestDefender = findClosestTarget(threat.position, availableDefenders);
-                if (closestDefender) {
-                    dispatch({ type: 'COMMAND_UNIT', payload: { unitId: closestDefender.id, targetId: threat.id, targetPosition: threat.position } });
+                    if (closestDefender) {
+                    dispatch({
+                        type: 'COMMAND_UNIT',
+                        payload: {
+                            unitId: closestDefender.id,
+                            orderType: UnitOrderType.ATTACK_TARGET,
+                            targetId: threat.id,
+                            targetPosition: threat.position,
+                            finalDestination: threat.position,
+                            source: 'ai',
+                        },
+                    });
                     return; // React to harassment and check again next cycle.
                 }
             }
@@ -269,7 +289,16 @@ const processSingleAiLogic = (
             if (totalHostileStrength > attackerStrength * ARMY_STRENGTH_MULTIPLIER_RETREAT) {
                 waveUnits.forEach((unit: Unit) => {
                     // Command to retreat to the town hall
-                    dispatch({ type: 'COMMAND_UNIT', payload: { unitId: unit.id, targetPosition: myTownHall.position } });
+                    dispatch({
+                        type: 'COMMAND_UNIT',
+                        payload: {
+                            unitId: unit.id,
+                            orderType: UnitOrderType.MOVE,
+                            targetPosition: myTownHall.position,
+                            finalDestination: myTownHall.position,
+                            source: 'ai',
+                        },
+                    });
                 });
                 // Reset AI attack state
                 aiState.attackState = 'idle';
@@ -306,8 +335,11 @@ const processSingleAiLogic = (
                         type: 'COMMAND_UNIT',
                         payload: {
                             unitId: worker.id,
+                            orderType: UnitOrderType.SMART,
                             targetPosition: constructionSite.position,
-                            targetId: constructionSite.id
+                            targetId: constructionSite.id,
+                            finalDestination: constructionSite.position,
+                            source: 'ai',
                         }
                     });
                 });
@@ -326,7 +358,17 @@ const processSingleAiLogic = (
                  availableDefenders.forEach(defender => {
                     const closestThreat = findClosestTarget(defender.position, threats);
                     if (closestThreat && defender.targetId !== closestThreat.id) {
-                        dispatch({ type: 'COMMAND_UNIT', payload: { unitId: defender.id, targetPosition: closestThreat.position, targetId: closestThreat.id } });
+                        dispatch({
+                            type: 'COMMAND_UNIT',
+                            payload: {
+                                unitId: defender.id,
+                                orderType: UnitOrderType.ATTACK_TARGET,
+                                targetPosition: closestThreat.position,
+                                targetId: closestThreat.id,
+                                finalDestination: closestThreat.position,
+                                source: 'ai',
+                            },
+                        });
                     }
                 });
                 return;
@@ -365,7 +407,14 @@ const processSingleAiLogic = (
             if (targetResource) {
                 dispatch({
                     type: 'COMMAND_UNIT',
-                    payload: { unitId: worker.id, targetPosition: targetResource.position, targetId: targetResource.id },
+                    payload: {
+                        unitId: worker.id,
+                        orderType: UnitOrderType.SMART,
+                        targetPosition: targetResource.position,
+                        targetId: targetResource.id,
+                        finalDestination: targetResource.position,
+                        source: 'ai',
+                    },
                 });
             }
         });
@@ -610,7 +659,17 @@ const processSingleAiLogic = (
 
                 if (target) {
                     attackingForce.forEach(unit => {
-                        dispatch({ type: 'COMMAND_UNIT', payload: { unitId: unit.id, targetPosition: target.position, targetId: target.id, finalDestination: target.position } });
+                        dispatch({
+                            type: 'COMMAND_UNIT',
+                            payload: {
+                                unitId: unit.id,
+                                orderType: UnitOrderType.ATTACK_TARGET,
+                                targetPosition: target.position,
+                                targetId: target.id,
+                                finalDestination: target.position,
+                                source: 'ai',
+                            },
+                        });
                     });
                 } else {
                      // No targets found, disband attack
@@ -666,7 +725,16 @@ const processSingleAiLogic = (
                     const formationPositions = getFormationPositions(aiState.attackRallyPoint, attackingUnits.length);
                     attackingUnits.forEach((unit, index) => {
                         const destination = formationPositions[index] || aiState.attackRallyPoint!;
-                        dispatch({ type: 'COMMAND_UNIT', payload: { unitId: unit.id, targetPosition: destination, finalDestination: destination } });
+                        dispatch({
+                            type: 'COMMAND_UNIT',
+                            payload: {
+                                unitId: unit.id,
+                                orderType: UnitOrderType.MOVE,
+                                targetPosition: destination,
+                                finalDestination: destination,
+                                source: 'ai',
+                            },
+                        });
                     });
                     
                     aiState.attackWaveCooldown = 120; // Reset cooldown for the next wave

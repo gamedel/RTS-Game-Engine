@@ -46,6 +46,42 @@ export enum UnitStance {
     HOLD_GROUND = 'HOLD_GROUND',
 }
 
+export enum UnitOrderType {
+    SMART = 'SMART',
+    MOVE = 'MOVE',
+    ATTACK_TARGET = 'ATTACK_TARGET',
+    ATTACK_MOVE = 'ATTACK_MOVE',
+    PATROL = 'PATROL',
+    HOLD_POSITION = 'HOLD_POSITION',
+    STOP = 'STOP',
+}
+
+export type UnitCommandSource = 'player' | 'ai' | 'auto';
+
+export interface UnitOrder {
+    id: string;
+    type: UnitOrderType;
+    source: UnitCommandSource;
+    issuedAt: number;
+    targetId?: string;
+    point?: Vector3;
+    auxiliaryPoint?: Vector3;
+    guardPoint?: Vector3;
+    queue?: boolean;
+    metadata?: Record<string, unknown>;
+}
+
+export type UnitCommandPayload = {
+    unitId: string;
+    orderType: UnitOrderType;
+    targetPosition?: Vector3;
+    targetId?: string;
+    queue?: boolean;
+    finalDestination?: Vector3;
+    squadId?: string;
+    source?: UnitCommandSource;
+};
+
 export type WorkerGatherPhase = 'travelToResource' | 'harvesting' | 'travelToDropoff';
 export type WorkerBuildPhase = 'travelToSite' | 'building';
 export type WorkerRepairPhase = 'travelToTarget' | 'repairing';
@@ -142,6 +178,24 @@ export interface Unit extends BaseGameObject {
   pathTarget?: Vector3; // Final destination of the current path
   finalDestination?: Vector3; // The ultimate destination of a command sequence (e.g., attack-move)
   squadId?: string; // For squad pathfinding optimization
+  currentOrder?: UnitOrder;
+  orderQueue?: UnitOrder[];
+  lastOrderIssuedAt?: number;
+  patrolRoute?: {
+    origin: Vector3;
+    destination: Vector3;
+    stage: 'outbound' | 'return';
+  };
+  // Auto-attack behavior
+  guardPosition?: Vector3;
+  guardReturnRadius?: number;
+  guardPursuitRadius?: number;
+  isReturningToGuard?: boolean;
+  threatTargetId?: string;
+  threatExpireAt?: number;
+  recentAttackerId?: string;
+  lastThreatTime?: number;
+  acquisitionCooldown?: number;
   // Combat Stats
   attackDamage: number;
   attackSpeed: number; // Attacks per second
@@ -178,6 +232,9 @@ export interface Building extends BaseGameObject {
   isUpgraded?: boolean;
   upgradeProgress?: number;
   upgradeTimer?: number;
+  // Collapse / destruction
+  isCollapsing?: boolean;
+  collapseStartedAt?: number;
 }
 
 export interface ResourceNode extends BaseGameObject {
@@ -217,6 +274,8 @@ export interface CommandMarker {
     id: string;
     position: Vector3;
     startTime: number;
+    color?: string;
+    radius?: number;
 }
 
 export interface ExplosionMarker {
@@ -295,7 +354,7 @@ export type Action =
   | { type: 'START_NEW_GAME'; payload: { mapType: MapType; players: PlayerSetupConfig[] } }
   | { type: 'SELECT_OBJECT'; payload: { id: string | null; isShift?: boolean } }
   | { type: 'SET_SELECTION'; payload: string[] }
-  | { type: 'COMMAND_UNIT'; payload: { unitId: string, targetPosition: Vector3, targetId?: string, finalDestination?: Vector3, squadId?: string } }
+  | { type: 'COMMAND_UNIT'; payload: UnitCommandPayload }
   | { type: 'GAME_TICK'; payload: { deltaTime: number } }
   | { type: 'ADD_RESOURCES'; payload: { wood?: number; gold?: number; playerId: number } }
   | { type: 'UPDATE_RESOURCE_NODE'; payload: Partial<ResourceNode> & { id: string } }
@@ -311,6 +370,7 @@ export type Action =
   | { type: 'SPAWN_UNIT_FROM_QUEUE', payload: { buildingId: string, unitType: UnitType, playerId: number } }
   | { type: 'ADD_UNIT'; payload: { unit: Partial<Unit>, playerId: number } }
   | { type: 'UPDATE_BUILDING'; payload: Partial<Building> & { id: string } }
+  | { type: 'REMOVE_BUILDING'; payload: { id: string } }
   | { type: 'ADD_FLOATING_TEXT', payload: FloatingText }
   | { type: 'REMOVE_FLOATING_TEXT', payload: string }
   | { type: 'ADD_COMMAND_MARKER', payload: CommandMarker }

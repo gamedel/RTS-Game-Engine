@@ -2,7 +2,8 @@ import React, { useMemo, useCallback, useRef, useState, useEffect, forwardRef, u
 import { useThree, useFrame } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
-import { GameState, Action, GameObject, GameObjectType, UnitType, BuildingType, ResourceType, Unit, Building, ResourceNode, UnitStatus, Vector3, CommandMarker as CommandMarkerType, Projectile, UnitStance } from '../types';
+import { GameState, Action, GameObject, GameObjectType, UnitType, BuildingType, ResourceType, Unit, Building, ResourceNode, UnitStatus, Vector3, CommandMarker as CommandMarkerType, Projectile, UnitStance, UnitOrderType } from '../types';
+import { COLLISION_DATA } from '../constants';
 import { useGameEngine } from '../hooks/useGameEngine';
 import { TownHall, Barracks, House, DefensiveTower, Warehouse, ResearchCenter, Market } from './game/buildings';
 import { Tree, GoldMine } from './game/resources';
@@ -226,7 +227,80 @@ const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, s
     }
   }, []);
 
+  const [commandMode, setCommandMode] = useState<'default' | 'attack-move' | 'patrol'>('default');
   const selectedIdsSet = useMemo(() => new Set(gameState.selectedIds), [gameState.selectedIds]);
+  const getSelectedPlayerUnits = useCallback((): Unit[] => {
+    if (!humanPlayer) return [];
+    return gameState.selectedIds
+      .map(id => gameState.units[id])
+      .filter((u): u is Unit => !!u && u.type === GameObjectType.UNIT && u.playerId === humanPlayer.id);
+  }, [gameState.selectedIds, gameState.units, humanPlayer]);
+
+  const issueStopCommand = useCallback(() => {
+    if (!humanPlayer) return;
+    const units = getSelectedPlayerUnits();
+    if (!units.length) return;
+    units.forEach(unit => {
+      dispatch({
+        type: 'COMMAND_UNIT',
+        payload: { unitId: unit.id, orderType: UnitOrderType.STOP },
+      });
+    });
+  }, [dispatch, getSelectedPlayerUnits, humanPlayer]);
+
+  const issueHoldPositionCommand = useCallback(() => {
+    if (!humanPlayer) return;
+    const units = getSelectedPlayerUnits();
+    if (!units.length) return;
+    units.forEach(unit => {
+      dispatch({
+        type: 'COMMAND_UNIT',
+        payload: { unitId: unit.id, orderType: UnitOrderType.HOLD_POSITION },
+      });
+    });
+  }, [dispatch, getSelectedPlayerUnits, humanPlayer]);
+
+  useEffect(() => {
+    if (commandMode !== 'default' && gamePhase !== 'playing') {
+      setCommandMode('default');
+    }
+  }, [commandMode, gamePhase]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (gamePhase !== 'playing' || !humanPlayer) return;
+      const key = event.key.toLowerCase();
+      if (key === 'a') {
+        event.preventDefault();
+        setCommandMode('attack-move');
+      } else if (key === 'p') {
+        event.preventDefault();
+        setCommandMode('patrol');
+      } else if (key === 's') {
+        event.preventDefault();
+        issueStopCommand();
+        setCommandMode('default');
+      } else if (key === 'h') {
+        event.preventDefault();
+        issueHoldPositionCommand();
+        setCommandMode('default');
+      }
+    };
+
+    const handleKeyUp = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      if ((key === 'a' && commandMode === 'attack-move') || (key === 'p' && commandMode === 'patrol')) {
+        setCommandMode('default');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [commandMode, gamePhase, humanPlayer, issueHoldPositionCommand, issueStopCommand]);
 
 
   useEffect(() => {
@@ -307,24 +381,51 @@ const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, s
     const target = allObjectsMap.get(targetId);
     if (!target) return;
     
-    const selectedUnits = gameState.selectedIds
-        .map(id => gameState.units[id])
-        .filter(u => u && u.type === GameObjectType.UNIT && u.playerId === humanPlayer.id);
+    const selectedUnits = getSelectedPlayerUnits();
     
     if (selectedUnits.length > 0) {
         selectedUnits.forEach(unit => {
-           dispatch({ type: 'COMMAND_UNIT', payload: { unitId: unit.id, targetPosition: target.position, targetId, finalDestination: target.position } });
+           dispatch({
+               type: 'COMMAND_UNIT',
+               payload: {
+                   unitId: unit.id,
+                   orderType: UnitOrderType.SMART,
+                   targetPosition: target.position,
+                   targetId,
+                   finalDestination: target.position,
+                   queue: !!e.shiftKey,
+               },
+           });
         });
 
-        // Add a single marker on the target
+        const isEnemyTarget =
+            target.type !== GameObjectType.RESOURCE &&
+            target.playerId !== undefined &&
+            target.playerId !== humanPlayer.id;
+        let markerRadius;
+        if (target.type === GameObjectType.UNIT) {
+            const targetUnit = target as Unit;
+            const collision = COLLISION_DATA.UNITS[targetUnit.unitType];
+            markerRadius = (collision?.radius ?? 0.9) * 1.6;
+        } else if (target.type === GameObjectType.BUILDING) {
+            const targetBuilding = target as Building;
+            const collision = COLLISION_DATA.BUILDINGS[targetBuilding.buildingType];
+            if (collision) {
+                markerRadius = Math.max(collision.width, collision.depth) * 0.55;
+            }
+        }
+
         const marker: CommandMarkerType = {
             id: uuidv4(),
             position: target.position,
             startTime: Date.now(),
+            color: isEnemyTarget ? '#ef4444' : '#38bdf8',
+            radius: markerRadius,
         };
         dispatch({ type: 'ADD_COMMAND_MARKER', payload: marker });
     }
-  }, [dispatch, gameState.selectedIds, gameState.units, gameState.buildMode, allObjectsMap, gamePhase, humanPlayer, preventEventDefault]);
+    if (commandMode !== 'default') setCommandMode('default');
+  }, [commandMode, dispatch, getSelectedPlayerUnits, gameState.buildMode, allObjectsMap, gamePhase, humanPlayer, preventEventDefault, setCommandMode]);
 
   const processGroundSimpleClick = useCallback((e: any) => {
     if (gamePhase !== 'playing' || !humanPlayer) return;
@@ -404,40 +505,60 @@ const GameScene: React.FC<GameSceneProps> = ({ gamePhase, gameState, dispatch, s
                 id: uuidv4(),
                 position: rallyPosition,
                 startTime: Date.now(),
+                color: commandMode === 'patrol' ? '#fde047' : commandMode === 'attack-move' ? '#f97316' : '#34d399',
             };
             dispatch({ type: 'ADD_COMMAND_MARKER', payload: marker });
+            if (commandMode !== 'default') setCommandMode('default');
             return;
         }
     }
 
-    const selectedUnits = gameState.selectedIds
-        .map(id => gameState.units[id])
-        .filter(u => u && u.type === GameObjectType.UNIT && u.playerId === humanPlayer.id) as Unit[];
+    const selectedUnits = getSelectedPlayerUnits();
 
     if (selectedUnits.length > 0) {
         const targetCenter = { x: e.point.x, y: 0, z: e.point.z };
         const formationPositions = getFormationPositions(targetCenter, selectedUnits.length);
         const squadId = uuidv4();
+        const activeOrderType =
+            commandMode === 'attack-move'
+                ? UnitOrderType.ATTACK_MOVE
+                : commandMode === 'patrol'
+                    ? UnitOrderType.PATROL
+                    : UnitOrderType.MOVE;
+        const markerColor = commandMode === 'attack-move' ? '#f97316' : commandMode === 'patrol' ? '#fde047' : '#34d399';
 
-        // Distribute positions to units
         selectedUnits.forEach((unit, index) => {
             const targetPosition = formationPositions[index] || targetCenter;
-            dispatch({ type: 'COMMAND_UNIT', payload: { unitId: unit.id, targetPosition, finalDestination: targetPosition, targetId: undefined, squadId } });
+            dispatch({
+                type: 'COMMAND_UNIT',
+                payload: {
+                    unitId: unit.id,
+                    orderType: activeOrderType,
+                    targetPosition,
+                    finalDestination: targetPosition,
+                    targetId: undefined,
+                    squadId,
+                    queue: !!e.shiftKey,
+                },
+            });
         });
 
-        // Show a reduced number of markers for performance
         formationPositions.forEach((pos, i) => {
-            // Show one marker for every 6 units, plus the very last one to mark the formation's end
             if (i % 6 !== 0 && i !== formationPositions.length - 1) return;
             const marker: CommandMarkerType = {
                 id: uuidv4(),
                 position: pos,
                 startTime: Date.now(),
+                color: markerColor,
+                radius: 1,
             };
             dispatch({ type: 'ADD_COMMAND_MARKER', payload: marker });
         });
     }
-  }, [dispatch, gameState.selectedIds, gameState.units, gameState.buildings, gameState.buildMode, gamePhase, humanPlayer, preventEventDefault]);
+
+    if (commandMode !== 'default') setCommandMode('default');
+  }, [commandMode, dispatch, gameState.selectedIds, gameState.units, gameState.buildings, gameState.buildMode, gamePhase, getSelectedPlayerUnits, humanPlayer, preventEventDefault, setCommandMode]);
+
 
   const handleGroundPointerDown = useCallback((e: any) => {
     if (gamePhase !== 'playing') return;

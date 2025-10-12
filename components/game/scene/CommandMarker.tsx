@@ -8,6 +8,9 @@ import { COMMAND_MARKER_DURATION } from '../../../constants';
 export const CommandMarker: React.FC<{ markerData: CommandMarkerType }> = ({ markerData }) => {
     const ringRef = useRef<THREE.Mesh>(null!);
     const initialScale = 1.5;
+    const ringColor = markerData.color ?? '#38bdf8';
+    const innerRadius = markerData.radius ?? 0.9;
+    const outerRadius = innerRadius + 0.12;
 
     useFrame(() => {
         if (!ringRef.current) return;
@@ -25,8 +28,8 @@ export const CommandMarker: React.FC<{ markerData: CommandMarkerType }> = ({ mar
 
     return (
         <group position={[markerData.position.x, 0.1, markerData.position.z]}>
-             <Ring ref={ringRef} args={[0.9, 1, 32]} rotation={[-Math.PI / 2, 0, 0]} >
-                <meshBasicMaterial color="#38bdf8" transparent toneMapped={false} />
+             <Ring ref={ringRef} args={[innerRadius, outerRadius, 32]} rotation={[-Math.PI / 2, 0, 0]} >
+                <meshBasicMaterial color={ringColor} transparent toneMapped={false} />
             </Ring>
         </group>
     );

@@ -1,5 +1,5 @@
 import { GameState, Action, UnitType, BuildingType } from '../../types';
-import { COMMAND_MARKER_DURATION, EXPLOSION_MARKER_DURATION, GOLD_MINE_DEPLETE_DURATION } from '../../constants';
+import { COMMAND_MARKER_DURATION, EXPLOSION_MARKER_DURATION, GOLD_MINE_DEPLETE_DURATION, BUILDING_COLLAPSE_DURATION } from '../../constants';
 import { BufferedDispatch } from '../../state/batch';
 
 const TREE_REMOVE_DELAY = 2000; // ms
@@ -7,6 +7,7 @@ const FLOATING_TEXT_DURATION = 2000; // ms
 
 export const processWorldLogic = (state: GameState, delta: number, dispatch: BufferedDispatch) => {
     const { resourcesNodes, commandMarkers, explosionMarkers, floatingTexts } = state;
+    const buildingMap = state.buildings;
     const now = Date.now();
 
     // --- Resource logic (remove fallen trees and depleted mines) ---
@@ -44,6 +45,22 @@ export const processWorldLogic = (state: GameState, delta: number, dispatch: Buf
         Object.values(floatingTexts).forEach(text => {
             if (now - text.startTime > FLOATING_TEXT_DURATION) {
                 dispatch({ type: 'REMOVE_FLOATING_TEXT', payload: text.id });
+            }
+        });
+    }
+
+    if (buildingMap) {
+        Object.values(buildingMap).forEach(building => {
+            if (building.hp !== undefined && building.hp <= 0 && !building.isCollapsing) {
+                dispatch({
+                    type: 'UPDATE_BUILDING',
+                    payload: { id: building.id, hp: Math.min(building.hp, 0) },
+                });
+                return;
+            }
+
+            if (building.isCollapsing && building.collapseStartedAt && (now - building.collapseStartedAt > BUILDING_COLLAPSE_DURATION)) {
+                dispatch({ type: 'REMOVE_BUILDING', payload: { id: building.id } });
             }
         });
     }

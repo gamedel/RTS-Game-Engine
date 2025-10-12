@@ -207,8 +207,8 @@ function AppContent() {
       top,
       width,
       height,
-      border: '1px solid #0ea5e9',
-      backgroundColor: 'rgba(14, 165, 233, 0.2)',
+      border: '1px solid #22c55e',
+      backgroundColor: 'rgba(34, 197, 94, 0.22)',
       pointerEvents: 'none',
       zIndex: 20,
     };

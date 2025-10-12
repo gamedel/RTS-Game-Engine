@@ -1,10 +1,11 @@
-import { GameState, UnitStatus, UnitType, Unit, GameObjectType, BuildingType, Building, Vector3 } from '../../types';
+import { GameState, UnitStatus, UnitType, Unit, GameObjectType, BuildingType, Building, ResourceNode, Vector3, UnitOrderType, UnitOrder } from '../../types';
 import { UNIT_CONFIG, COLLISION_DATA, DEATH_ANIMATION_DURATION, arePlayersHostile } from '../../constants';
 import { BufferedDispatch } from '../../state/batch';
 import { NavMeshManager } from '../utils/navMeshManager';
 import { Vec2, getDepenetrationVector, getSeparationVector } from '../utils/physics';
 import { SpatialHash } from '../utils/spatial';
 import { driveWorkerBehavior } from './workerBehavior';
+import { AUTO_COMBAT_SQUAD_ID } from './threatSystem';
 
 const buildingGrid = new SpatialHash(10);
 const unitGrid = new SpatialHash(5);
@@ -21,6 +22,67 @@ const distanceSqXZ = (ax: number, az: number, bx: number, bz: number) => {
     return dx * dx + dz * dz;
 };
 
+const copyVector = (vec: Vector3): Vector3 => ({ x: vec.x, y: vec.y, z: vec.z });
+
+const hasReachedPoint = (unit: Unit, point: Vector3 | undefined, threshold = 1.5): boolean => {
+    if (!point) return false;
+    const dx = unit.position.x - point.x;
+    const dz = unit.position.z - point.z;
+    return dx * dx + dz * dz <= threshold * threshold;
+};
+
+const resolveOrderTarget = (
+    state: GameState,
+    order: UnitOrder,
+): Unit | Building | ResourceNode | undefined => {
+    if (!order.targetId) return undefined;
+    return (
+        state.units[order.targetId] ||
+        state.buildings[order.targetId] ||
+        state.resourcesNodes[order.targetId]
+    );
+};
+
+const getOrderAnchor = (state: GameState, order: UnitOrder): Vector3 | undefined => {
+    if (order.point) return order.point;
+    const target = resolveOrderTarget(state, order);
+    return target ? target.position : undefined;
+};
+
+const isOrderFulfilled = (state: GameState, unit: Unit): boolean => {
+    const order = unit.currentOrder;
+    if (!order) return false;
+
+    switch (order.type) {
+        case UnitOrderType.MOVE:
+            if (hasReachedPoint(unit, getOrderAnchor(state, order))) return true;
+            return unit.status === UnitStatus.IDLE && !unit.path && !unit.pathTarget;
+        case UnitOrderType.ATTACK_MOVE:
+            if (unit.finalDestination) {
+                if (hasReachedPoint(unit, unit.finalDestination, 2.25)) {
+                    return !unit.threatTargetId;
+                }
+                return false;
+            }
+            return unit.status === UnitStatus.IDLE && !unit.threatTargetId;
+        case UnitOrderType.ATTACK_TARGET: {
+            if (!order.targetId) return true;
+            const target = resolveOrderTarget(state, order);
+            if (!target) return true;
+            if ('hp' in target && target.hp <= 0) return true;
+            return false;
+        }
+        case UnitOrderType.HOLD_POSITION:
+            return true;
+        case UnitOrderType.PATROL:
+            return false;
+        case UnitOrderType.STOP:
+            return true;
+        default:
+            return false;
+    }
+};
+
 // --- Main Unit Logic ---
 
 export const processUnitLogic = (state: GameState, delta: number, dispatch: BufferedDispatch) => {
@@ -32,6 +94,7 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
         buildingGrid.insert(building.id, building.position.x, building.position.z);
         if (
             building.constructionProgress === undefined &&
+            !building.isCollapsing &&
             (building.buildingType === BuildingType.TOWN_HALL || building.buildingType === BuildingType.WAREHOUSE)
         ) {
             const list = dropoffsByPlayer.get(building.playerId) ?? [];
@@ -92,6 +155,72 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
         const unitPos = unit.position;
         const unitPosX = unitPos.x;
         const unitPosZ = unitPos.z;
+
+        if (unit.orderQueue && unit.orderQueue.length) {
+            const workingOnWorkerJob = unit.unitType === UnitType.WORKER && !!unit.workerOrder;
+            if (!workingOnWorkerJob) {
+                const shouldAdvance = !unit.currentOrder || isOrderFulfilled(state, unit);
+                if (shouldAdvance) {
+                    const [nextOrder, ...rest] = unit.orderQueue;
+                    if (nextOrder) {
+                        const anchor = getOrderAnchor(state, nextOrder);
+                        const finalDest = nextOrder.guardPoint ?? anchor;
+                        dispatch({
+                            type: 'COMMAND_UNIT',
+                            payload: {
+                                unitId: unit.id,
+                                orderType: nextOrder.type,
+                                targetPosition: anchor ? copyVector(anchor) : undefined,
+                                targetId: nextOrder.targetId,
+                                finalDestination: finalDest ? copyVector(finalDest) : undefined,
+                                squadId: unit.squadId,
+                                source: nextOrder.source,
+                            },
+                        });
+                        dispatch({
+                            type: 'UPDATE_UNIT',
+                            payload: {
+                                id: unit.id,
+                                orderQueue: rest.length ? rest : undefined,
+                            },
+                        });
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if (unit.patrolRoute) {
+            const { origin, destination, stage } = unit.patrolRoute;
+            const patrolTarget = stage === 'outbound' ? destination : origin;
+            if (hasReachedPoint(unit, patrolTarget, 1.2)) {
+                const nextStage = stage === 'outbound' ? 'return' : 'outbound';
+                const nextTarget = nextStage === 'outbound' ? destination : origin;
+                dispatch({
+                    type: 'UPDATE_UNIT',
+                    payload: {
+                        id: unit.id,
+                        patrolRoute: {
+                            origin,
+                            destination,
+                            stage: nextStage,
+                        },
+                    },
+                });
+                dispatch({
+                    type: 'COMMAND_UNIT',
+                    payload: {
+                        unitId: unit.id,
+                        orderType: UnitOrderType.ATTACK_MOVE,
+                        targetPosition: copyVector(nextTarget),
+                        finalDestination: copyVector(nextTarget),
+                        squadId: AUTO_COMBAT_SQUAD_ID,
+                        source: 'auto',
+                    },
+                });
+                continue;
+            }
+        }
 
         const pathTarget = unit.pathTarget;
         if (unit.status === UnitStatus.MOVING && pathTarget && !unit.path && unit.pathIndex === undefined && !NavMeshManager.isRequestPending(unit.id)) {
@@ -208,14 +337,154 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                     dispatch({ type: 'UPDATE_UNIT', payload: { id: unit.id, position: next } });
                 }
             }
-        } 
+        }
+
+        const nearbyUnitIds = unitGrid.queryNeighbors(unitPosX, unitPosZ, unitNeighbors);
+
+        if (unit.unitType === UnitType.WORKER && !unit.isDying) {
+            const fleeRadius = UNIT_CONFIG[UnitType.WORKER]?.fleeRadius ?? 0;
+            if (fleeRadius > 0) {
+                const fleeRadiusSq = fleeRadius * fleeRadius;
+                let threatCount = 0;
+                let avgThreatX = 0;
+                let avgThreatZ = 0;
+                let nearestThreat: Unit | undefined;
+                let nearestThreatDistSq = Infinity;
+
+                for (const neighborId of nearbyUnitIds) {
+                    if (neighborId === unit.id) continue;
+                    const neighbor = units[neighborId];
+                    if (!neighbor || neighbor.isDying) continue;
+                    if (!arePlayersHostile(owner, players[neighbor.playerId])) continue;
+                    const threatDistSq = distanceSqXZ(unitPosX, unitPosZ, neighbor.position.x, neighbor.position.z);
+                    if (threatDistSq > fleeRadiusSq) continue;
+                    threatCount++;
+                    avgThreatX += neighbor.position.x;
+                    avgThreatZ += neighbor.position.z;
+                    if (threatDistSq < nearestThreatDistSq) {
+                        nearestThreatDistSq = threatDistSq;
+                        nearestThreat = neighbor;
+                    }
+                }
+
+                if (threatCount > 0) {
+                    const centerX = avgThreatX / threatCount;
+                    const centerZ = avgThreatZ / threatCount;
+                    let dirX = unitPosX - centerX;
+                    let dirZ = unitPosZ - centerZ;
+                    let dirLen = Math.hypot(dirX, dirZ);
+                    if (dirLen < 1e-3 && nearestThreat) {
+                        dirX = unitPosX - nearestThreat.position.x;
+                        dirZ = unitPosZ - nearestThreat.position.z;
+                        dirLen = Math.hypot(dirX, dirZ);
+                    }
+                    if (dirLen < 1e-3) {
+                        const angle = Math.random() * Math.PI * 2;
+                        dirX = Math.cos(angle);
+                        dirZ = Math.sin(angle);
+                        dirLen = 1;
+                    }
+
+                    const retreatDistance = fleeRadius * 1.6;
+                    let fleeTarget: Vector3 | undefined;
+
+                    const guardPosition = unit.guardPosition;
+                    if (guardPosition) {
+                        const guardThreatDistSq = distanceSqXZ(guardPosition.x, guardPosition.z, centerX, centerZ);
+                        if (guardThreatDistSq > fleeRadiusSq * 1.25) {
+                            fleeTarget = { x: guardPosition.x, y: guardPosition.y ?? 0, z: guardPosition.z };
+                        }
+                    }
+
+                    if (!fleeTarget) {
+                        const dropoffs = dropoffsByPlayer.get(unit.playerId) ?? [];
+                        if (dropoffs.length) {
+                            let bestDropoff: Building | undefined;
+                            let bestScore = -Infinity;
+                            for (const dropoff of dropoffs) {
+                                const distToThreatSq = distanceSqXZ(dropoff.position.x, dropoff.position.z, centerX, centerZ);
+                                const distToUnitSq = distanceSqXZ(dropoff.position.x, dropoff.position.z, unitPosX, unitPosZ);
+                                const score = distToThreatSq - distToUnitSq * 0.3;
+                                if (distToThreatSq > fleeRadiusSq * 0.8 && score > bestScore) {
+                                    bestScore = score;
+                                    bestDropoff = dropoff;
+                                }
+                            }
+                            if (bestDropoff) {
+                                fleeTarget = { x: bestDropoff.position.x, y: 0, z: bestDropoff.position.z };
+                            }
+                        }
+                    }
+
+                    if (!fleeTarget) {
+                        fleeTarget = {
+                            x: unitPosX + (dirX / dirLen) * retreatDistance,
+                            y: 0,
+                            z: unitPosZ + (dirZ / dirLen) * retreatDistance,
+                        };
+                    }
+
+                    const existingTarget = unit.pathTarget ?? unit.targetPosition;
+                    const alreadyFleeing =
+                        unit.status === UnitStatus.FLEEING &&
+                        existingTarget &&
+                        distanceSqXZ(existingTarget.x, existingTarget.z, fleeTarget.x, fleeTarget.z) < 4;
+
+                    if (!alreadyFleeing) {
+                        dispatch({
+                            type: 'UPDATE_UNIT',
+                            payload: {
+                                id: unit.id,
+                                status: UnitStatus.FLEEING,
+                                workerOrder: undefined,
+                                gatherTargetId: undefined,
+                                isHarvesting: false,
+                                harvestingResourceType: undefined,
+                                buildTask: undefined,
+                                repairTask: undefined,
+                                acquisitionCooldown: 1.5,
+                            },
+                        });
+
+                        dispatch({
+                            type: 'COMMAND_UNIT',
+                            payload: {
+                                unitId: unit.id,
+                                orderType: UnitOrderType.MOVE,
+                                targetPosition: fleeTarget,
+                                finalDestination: fleeTarget,
+                                squadId: AUTO_COMBAT_SQUAD_ID,
+                            },
+                        });
+                    }
+
+                    continue;
+                } else if (unit.status === UnitStatus.FLEEING && (!unit.acquisitionCooldown || unit.acquisitionCooldown <= 0)) {
+                    dispatch({
+                        type: 'UPDATE_UNIT',
+                        payload: { id: unit.id, status: UnitStatus.IDLE, acquisitionCooldown: undefined },
+                    });
+                }
+            }
+        }
 
         driveWorkerBehavior(state, unit, delta, dispatch, dropoffsByPlayer, frameNow);
 
         // --- "Attack-Move" Continuation Logic ---
         if (unit.status === UnitStatus.IDLE && unit.finalDestination) {
             if (distanceSqXZ(unitPosX, unitPosZ, unit.finalDestination.x, unit.finalDestination.z) > 9) {
-                dispatch({ type: 'COMMAND_UNIT', payload: { unitId: unit.id, targetPosition: unit.finalDestination, finalDestination: unit.finalDestination } });
+                const resumeOrderType =
+                    unit.currentOrder?.type === UnitOrderType.ATTACK_MOVE ? UnitOrderType.ATTACK_MOVE : UnitOrderType.MOVE;
+                dispatch({
+                    type: 'COMMAND_UNIT',
+                    payload: {
+                        unitId: unit.id,
+                        orderType: resumeOrderType,
+                        targetPosition: unit.finalDestination,
+                        finalDestination: unit.finalDestination,
+                        squadId: AUTO_COMBAT_SQUAD_ID,
+                    },
+                });
             } else {
                 dispatch({ type: 'UPDATE_UNIT', payload: { id: unit.id, finalDestination: undefined } });
             }
@@ -237,7 +506,6 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
             }
         }
 
-        const nearbyUnitIds = unitGrid.queryNeighbors(unitPosX, unitPosZ, unitNeighbors);
         if (nearbyUnitIds.length > 1) {
             const neighbors = neighborUnits;
             neighbors.length = 0;

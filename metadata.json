@@ -2,5 +2,5 @@
   "name": "RTS Game Engine",
   "description": "A simple Real-Time Strategy game built with React, Three.js. Players can gather resources, build structures, and train units. The game state is managed with a reducer, and game logic is processed in the render loop.",
   "requestFramePermissions": [],
-  "entryBundle": "assets/index-z259y8qN.js"
+  "entryBundle": "assets/index-ud8VyAiD.js"
 }
