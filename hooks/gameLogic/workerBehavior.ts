@@ -10,6 +10,7 @@ import {
     WorkerOrder,
     ResearchCategory,
     UnitOrderType,
+    Vector3,
 } from '../../types';
 import {
     UNIT_CONFIG,
@@ -17,9 +18,11 @@ import {
     REPAIR_HP_PER_TICK,
     REPAIR_TICK_TIME,
     RESEARCH_CONFIG,
+    COLLISION_DATA,
 } from '../../constants';
 import { computeGatherAssignment } from '../utils/gatherSlots';
 import { computeBuildingApproachPoint } from '../utils/buildingApproach';
+import { NavMeshManager } from '../utils/navMeshManager';
 
 type GatherOrder = Extract<WorkerOrder, { kind: 'gather' }>;
 type BuildOrder = Extract<WorkerOrder, { kind: 'build' }>;
@@ -70,6 +73,20 @@ const getWorkerCapacity = (state: GameState, unit: Unit): number => {
 
 const getDropoffsForPlayer = (dropoffMap: DropoffMap, playerId: number): Building[] =>
     dropoffMap.get(playerId) ?? [];
+
+const adjustAnchorForUnit = (unit: Unit, anchor: Vector3): Vector3 => {
+    const unitRadius = COLLISION_DATA.UNITS[unit.unitType]?.radius ?? 0.4;
+    const detour = NavMeshManager.findLocalAdjustment(unit.position, anchor, {
+        agentRadius: unitRadius,
+        maxOffset: Math.max(3, unitRadius * 6),
+        angularSteps: 3,
+        radialIterations: 3,
+    });
+    if (detour) {
+        return { x: detour.x, y: 0, z: detour.z };
+    }
+    return anchor;
+};
 
 const findClosestDropoff = (unit: Unit, dropoffMap: DropoffMap): Building | null => {
     let best: Building | null = null;
@@ -153,7 +170,9 @@ const refreshGatherAnchor = (
     dispatch: BufferedDispatch,
     order: GatherOrder,
 ): GatherOrder | null => {
-    const { anchor, radius } = computeGatherAssignment(state, unit, resource);
+    const raw = computeGatherAssignment(state, unit, resource);
+    const anchor = adjustAnchorForUnit(unit, raw.anchor);
+    const radius = Math.max(raw.radius, Math.hypot(anchor.x - resource.position.x, anchor.z - resource.position.z));
     const updatedOrder: GatherOrder = {
         ...order,
         anchor,
@@ -187,7 +206,8 @@ const refreshDropoffAnchor = (
     dispatch: BufferedDispatch,
     order: GatherOrder,
 ): GatherOrder => {
-    const approach = computeBuildingApproachPoint(unit, dropoff, dropoff.position);
+    const rawApproach = computeBuildingApproachPoint(unit, dropoff, dropoff.position);
+    const approach = adjustAnchorForUnit(unit, rawApproach);
     const radius = Math.hypot(approach.x - dropoff.position.x, approach.z - dropoff.position.z);
     const updatedOrder: GatherOrder = {
         ...order,
@@ -219,7 +239,8 @@ const refreshBuildOrderAnchor = (
     dispatch: BufferedDispatch,
     order: BuildOrder,
 ): BuildOrder | null => {
-    const approach = computeBuildingApproachPoint(unit, building, building.position);
+    const rawApproach = computeBuildingApproachPoint(unit, building, building.position);
+    const approach = adjustAnchorForUnit(unit, rawApproach);
     const radius = Math.hypot(approach.x - building.position.x, approach.z - building.position.z);
     const updatedOrder: BuildOrder = {
         ...order,
@@ -255,7 +276,8 @@ const refreshRepairOrderAnchor = (
     dispatch: BufferedDispatch,
     order: RepairOrder,
 ): RepairOrder | null => {
-    const approach = computeBuildingApproachPoint(unit, building, building.position);
+    const rawApproach = computeBuildingApproachPoint(unit, building, building.position);
+    const approach = adjustAnchorForUnit(unit, rawApproach);
     const radius = Math.hypot(approach.x - building.position.x, approach.z - building.position.z);
     const updatedOrder: RepairOrder = {
         ...order,

@@ -10,6 +10,7 @@ type PathRequest = {
   startCell: Cell | null;
   goalCell: Cell | null;
   key: string | null;
+  requiredClearance: number;
 };
 
 type PathFollower = {
@@ -18,9 +19,17 @@ type PathFollower = {
   goal: Vector3;
   startCell: Cell | null;
   goalCell: Cell | null;
+  requiredClearance: number;
 };
 
 type Cell = { cx: number; cz: number };
+
+export type LocalAdjustmentOptions = {
+  agentRadius?: number;
+  maxOffset?: number;
+  angularSteps?: number;
+  radialIterations?: number;
+};
 
 type NavigationGrid = {
   cellSize: number;
@@ -43,6 +52,7 @@ type NavState = {
   agentPadding: number;
   maxSearchRadius: number;
   requiredClearance: number;
+  minAgentClearance: number;
   diagnostics: {
     lastSearchMs: number;
     lastSearchExpanded: number;
@@ -78,6 +88,7 @@ const EPSILON = 1e-4;
 const CACHE_BRIDGE_RADIUS_CELLS = 20;
 const BUILDING_EXTRA_PADDING = 0.06;
 const CLEARANCE_MARGIN = 0.12;
+const MIN_CLEARANCE_THRESHOLD = 0.18;
 const BUILDING_AGENT_PADDING_CAP = 0.3;
 const FLOW_FIELD_TTL = 4500;
 const FLOW_FIELD_CACHE_MAX = 64;
@@ -102,6 +113,7 @@ const navState: NavState = {
   agentPadding: 0,
   maxSearchRadius: 0,
   requiredClearance: 0,
+  minAgentClearance: 0,
   diagnostics: {
     lastSearchMs: 0,
     lastSearchExpanded: 0,
@@ -371,6 +383,14 @@ const isCellWalkable = (cell: Cell | null) => {
   return idx >= 0 ? navState.occupancy[idx] === 0 : false;
 };
 
+const clearanceForRadius = (radius: number) => {
+  return Math.max(radius + CLEARANCE_MARGIN, MIN_CLEARANCE_THRESHOLD);
+};
+
+const radiusFromClearance = (clearance: number) => {
+  return Math.max(0.2, clearance - CLEARANCE_MARGIN);
+};
+
 const ensureClearance = () => {
   if (!navState.clearanceDirty) return;
   if (!isGridReady() || !navState.clearance || !navState.occupancy) return;
@@ -434,21 +454,21 @@ const ensureClearance = () => {
   navState.clearanceDirty = false;
 };
 
-const canStep = (from: Cell, to: Cell) => {
-  if (!isCellTraversable(to)) return false;
+const canStep = (from: Cell, to: Cell, requiredClearance?: number) => {
+  if (!isCellTraversable(to, requiredClearance)) return false;
   const dx = to.cx - from.cx;
   const dz = to.cz - from.cz;
   if (dx !== 0 && dz !== 0) {
     const gateA = { cx: from.cx + dx, cz: from.cz };
     const gateB = { cx: from.cx, cz: from.cz + dz };
-    if (!isCellTraversable(gateA) || !isCellTraversable(gateB)) {
+    if (!isCellTraversable(gateA, requiredClearance) || !isCellTraversable(gateB, requiredClearance)) {
       return false;
     }
   }
   return true;
 };
 
-function isCellTraversable(cell: Cell | null): boolean {
+function isCellTraversable(cell: Cell | null, requiredClearance?: number): boolean {
   if (!cell) return false;
   if (!isCellWalkable(cell)) return false;
   if (!navState.grid || !navState.clearance) return false;
@@ -457,10 +477,12 @@ function isCellTraversable(cell: Cell | null): boolean {
   if (idx < 0) return false;
   if (!navState.clearance) return false;
   if (navState.occupancy && navState.occupancy[idx] > 0) return false;
-  return navState.clearance[idx] >= navState.requiredClearance - EPSILON;
+  const clearanceRequirement = requiredClearance ?? navState.requiredClearance;
+  return navState.clearance[idx] >= clearanceRequirement - EPSILON;
 }
 
-const isWorldWalkable = (point: Vector3) => isCellTraversable(worldToCell(point.x, point.z));
+const isWorldWalkable = (point: Vector3, requiredClearance?: number) =>
+  isCellTraversable(worldToCell(point.x, point.z), requiredClearance);
 
 const adjustCellOccupancy = (index: number, delta: number) => {
   if (!isGridReady()) return;
@@ -578,7 +600,11 @@ const getMaxSearchRadius = () => {
   return navState.maxSearchRadius || Math.ceil(Math.hypot(navState.grid.width, navState.grid.height));
 };
 
-const findNearestWalkableCell = (start: Cell | null, maxDistance = getMaxSearchRadius()): Cell | null => {
+const findNearestWalkableCell = (
+  start: Cell | null,
+  maxDistance = getMaxSearchRadius(),
+  requiredClearance?: number
+): Cell | null => {
   if (!start) return null;
   if (!navState.grid) return null;
 
@@ -588,7 +614,7 @@ const findNearestWalkableCell = (start: Cell | null, maxDistance = getMaxSearchR
 
   while (queue.length) {
     const current = queue.shift()!;
-    if (isCellTraversable(current.cell)) {
+    if (isCellTraversable(current.cell, requiredClearance)) {
       return current.cell;
     }
     if (current.distance >= maxDistance) continue;
@@ -633,20 +659,102 @@ const traverseLine = (start: Cell, end: Cell): Cell[] => {
   return points;
 };
 
-const lineIsClear = (start: Cell, end: Cell) => {
+const lineIsClear = (start: Cell, end: Cell, requiredClearance?: number) => {
   if (!navState.grid) return false;
   const samples = traverseLine(start, end);
   let prev: Cell | null = null;
   for (const cell of samples) {
-    if (!isCellTraversable(cell)) {
+    if (!isCellTraversable(cell, requiredClearance)) {
       return false;
     }
-    if (prev && !canStep(prev, cell)) {
+    if (prev && !canStep(prev, cell, requiredClearance)) {
       return false;
     }
     prev = cell;
   }
   return true;
+};
+
+const findLocalAdjustmentInternal = (
+  from: Vector3,
+  goal: Vector3,
+  options: LocalAdjustmentOptions = {}
+): Vector3 | null => {
+  if (!isGridReady() || !navState.grid) return null;
+  const {
+    agentRadius = navState.agentPadding || 0.5,
+    maxOffset = 4,
+    angularSteps = 4,
+    radialIterations = 4
+  } = options;
+
+  const requiredClearance = clearanceForRadius(agentRadius);
+  const startCell = worldToCell(from.x, from.z);
+  const desiredCell = worldToCell(goal.x, goal.z);
+
+  const clampCandidate = (cell: Cell | null) => {
+    if (!cell) return null;
+    return clampToWorld(cellToWorld(cell));
+  };
+
+  let initialTarget = desiredCell;
+  if (!initialTarget || !isCellTraversable(initialTarget, requiredClearance)) {
+    const maxCells = navState.grid ? Math.max(1, Math.ceil(maxOffset / navState.grid.cellSize)) : 1;
+    initialTarget = findNearestWalkableCell(desiredCell, maxCells, requiredClearance);
+  }
+
+  if (startCell && initialTarget && lineIsClear(startCell, initialTarget, requiredClearance)) {
+    return clampCandidate(initialTarget);
+  }
+
+  const direction = Math.atan2(goal.z - from.z, goal.x - from.x);
+  const angleSpread = Math.PI * 0.75;
+  const stepAngle = angularSteps > 0 ? angleSpread / (angularSteps + 1) : angleSpread;
+  const cellSize = navState.grid?.cellSize ?? 1;
+
+  let bestCandidate: { point: Vector3; penalty: number } | null = null;
+
+  for (let ring = 1; ring <= radialIterations; ring++) {
+    const radius = Math.min(maxOffset, ring * cellSize + agentRadius);
+    const baseAngles: number[] = [direction];
+    for (let step = 1; step <= angularSteps; step++) {
+      const offset = step * stepAngle;
+      baseAngles.push(direction + offset);
+      baseAngles.push(direction - offset);
+    }
+
+    for (const angle of baseAngles) {
+      const candidatePoint = {
+        x: goal.x + Math.cos(angle) * radius,
+        y: 0,
+        z: goal.z + Math.sin(angle) * radius
+      };
+      const candidateCell = worldToCell(candidatePoint.x, candidatePoint.z);
+      if (!candidateCell) continue;
+      if (!isCellTraversable(candidateCell, requiredClearance)) continue;
+      if (startCell && !lineIsClear(startCell, candidateCell, requiredClearance)) continue;
+      const clamped = clampCandidate(candidateCell);
+      if (!clamped) continue;
+      const toGoal = Math.hypot(clamped.x - goal.x, clamped.z - goal.z);
+      const toCurrent = Math.hypot(clamped.x - from.x, clamped.z - from.z);
+      const penalty = toGoal + toCurrent * 0.25 + radius * 0.05;
+      if (!bestCandidate || penalty < bestCandidate.penalty) {
+        bestCandidate = { point: clamped, penalty };
+      }
+    }
+
+    if (bestCandidate) break;
+  }
+
+  if (bestCandidate) {
+    return bestCandidate.point;
+  }
+
+  if (initialTarget) {
+    return clampCandidate(initialTarget);
+  }
+
+  return safeSnapInternal(goal, maxOffset);
 };
 
 type PathSolution = {
@@ -673,7 +781,7 @@ const storePathInCache = (start: Cell, goal: Cell, solution: PathSolution) => {
   pruneCache();
 };
 
-const bridgeCachedPath = (start: Cell, cached: CachedPath): PathSolution | null => {
+const bridgeCachedPath = (start: Cell, cached: CachedPath, requiredClearance: number): PathSolution | null => {
   if (!isGridReady()) return null;
   const startKey = encodeCell(start);
   const targetIndices = new Map<string, number>();
@@ -717,7 +825,7 @@ const bridgeCachedPath = (start: Cell, cached: CachedPath): PathSolution | null 
     }
 
     for (const neighbor of getNeighbors(current)) {
-      if (!canStep(current, neighbor)) continue;
+      if (!canStep(current, neighbor, requiredClearance)) continue;
       const key = encodeCell(neighbor);
       if (visited.has(key)) continue;
       visited.add(key);
@@ -731,7 +839,7 @@ const bridgeCachedPath = (start: Cell, cached: CachedPath): PathSolution | null 
   return null;
 };
 
-const reuseCachedPath = (start: Cell, goal: Cell): PathSolution | null => {
+const reuseCachedPath = (start: Cell, goal: Cell, requiredClearance: number): PathSolution | null => {
   const key = cacheKeyFor(start, goal);
   const cached = pathCache.get(key);
   if (!cached) return null;
@@ -743,8 +851,8 @@ const reuseCachedPath = (start: Cell, goal: Cell): PathSolution | null => {
   for (let i = 0; i < cached.cells.length; i++) {
     const candidate = cached.cells[i];
     if (!isCellInside(candidate)) continue;
-    if (!isCellTraversable(candidate)) continue;
-    if (!lineIsClear(start, candidate)) continue;
+    if (!isCellTraversable(candidate, requiredClearance)) continue;
+    if (!lineIsClear(start, candidate, requiredClearance)) continue;
 
     const remainder = cached.cells.slice(i);
     let cells: Cell[];
@@ -757,7 +865,7 @@ const reuseCachedPath = (start: Cell, goal: Cell): PathSolution | null => {
     return { cells, reachedGoal: cached.reachedGoal, expanded: 0, elapsedMs: 0 };
   }
 
-  const bridged = bridgeCachedPath(start, cached);
+  const bridged = bridgeCachedPath(start, cached, requiredClearance);
   if (bridged) {
     cached.timestamp = now();
     return bridged;
@@ -831,7 +939,7 @@ const pathFromFlowField = (_start: Cell, _field: FlowField): PathSolution | null
   return null;
 };
 
-const simplifyCells = (cells: Cell[]): Cell[] => {
+const simplifyCells = (cells: Cell[], requiredClearance: number): Cell[] => {
   if (cells.length <= 2) return cells;
   const result: Cell[] = [cells[0]];
   let anchorIndex = 0;
@@ -839,7 +947,7 @@ const simplifyCells = (cells: Cell[]): Cell[] => {
   for (let i = 2; i < cells.length; i++) {
     const anchor = cells[anchorIndex];
     const candidate = cells[i];
-    if (!lineIsClear(anchor, candidate)) {
+    if (!lineIsClear(anchor, candidate, requiredClearance)) {
       result.push(cells[i - 1]);
       anchorIndex = i - 1;
     }
@@ -895,8 +1003,8 @@ const solvePath = (start: Cell, goal: Cell): PathSolution => {
   };
 };
 
-const computePathSolution = (start: Cell, goal: Cell): PathSolution => {
-  const cached = reuseCachedPath(start, goal);
+const computePathSolution = (start: Cell, goal: Cell, requiredClearance: number): PathSolution => {
+  const cached = reuseCachedPath(start, goal, requiredClearance);
   if (cached) {
     return cached;
   }
@@ -971,6 +1079,7 @@ const applySolution = (
   goal: Vector3,
   startCell: Cell,
   solution: PathSolution,
+  requiredClearance: number,
   suppressDiagnostics = false
 ) => {
   pendingRequests.delete(unitId);
@@ -995,11 +1104,11 @@ const applySolution = (
     updateDiagnostics({ pending: pendingRequests.size, queueDepth: requestQueue.length });
   }
 
-  const simplified = simplifyCells(solution.cells);
+  const simplified = simplifyCells(solution.cells, requiredClearance);
   const trimmed = simplified.filter((cell, index) => !(index === 0 && cell.cx === startCell.cx && cell.cz === startCell.cz));
   const waypoints = trimmed.map(cell => clampToWorld(cellToWorld(cell)));
 
-  if (!waypoints.length && isWorldWalkable(goal)) {
+  if (!waypoints.length && isWorldWalkable(goal, requiredClearance)) {
     waypoints.push(clampToWorld(goal));
   }
 
@@ -1017,7 +1126,7 @@ const applySolution = (
     if (distSq > 1e-3) {
       waypoints.push(clampToWorld(goal));
     }
-  } else if (distSq > 1e-3 && isWorldWalkable(goal)) {
+  } else if (distSq > 1e-3 && isWorldWalkable(goal, requiredClearance)) {
     waypoints.push(clampToWorld(goal));
   }
 
@@ -1033,19 +1142,19 @@ const deliverFollowers = (
 
   for (const follower of followers) {
     const followerGoal = clampToWorld(follower.goal);
-    if (!isWorldWalkable(followerGoal)) {
+    if (!isWorldWalkable(followerGoal, follower.requiredClearance)) {
       handlePathFailure(follower.unitId, 'goal-not-walkable', true);
       continue;
     }
 
-    NavMeshManager.requestPath(follower.unitId, follower.start, follower.goal);
+    pendingRequests.delete(follower.unitId);
+    const followerRadius = radiusFromClearance(follower.requiredClearance);
+    NavMeshManager.requestPath(follower.unitId, follower.start, follower.goal, followerRadius);
   }
 };
 
 const processNextRequest = () => {
   if (!isGridReady()) return false;
-  ensureWorker();
-  if (!navState.worker || navState.workerBusy || !navState.workerReady) return false;
   const req = requestQueue.shift();
   if (!req) return false;
 
@@ -1061,8 +1170,10 @@ const processNextRequest = () => {
   const clampedStart = clampToWorld(req.start);
   const clampedGoal = clampToWorld(req.goal);
 
-  const startCell = req.startCell ?? findNearestWalkableCell(worldToCell(clampedStart.x, clampedStart.z));
-  const goalCell = req.goalCell ?? findNearestWalkableCell(worldToCell(clampedGoal.x, clampedGoal.z));
+  const startCell =
+    req.startCell ?? findNearestWalkableCell(worldToCell(clampedStart.x, clampedStart.z), undefined, req.requiredClearance);
+  const goalCell =
+    req.goalCell ?? findNearestWalkableCell(worldToCell(clampedGoal.x, clampedGoal.z), undefined, req.requiredClearance);
 
   if (!startCell || !goalCell) {
     handlePathFailure(unitId, 'missing-start-or-goal');
@@ -1073,11 +1184,11 @@ const processNextRequest = () => {
   }
 
   if (startCell.cx === goalCell.cx && startCell.cz === goalCell.cz) {
-    if (isWorldWalkable(clampedGoal)) {
+    if (isWorldWalkable(clampedGoal, req.requiredClearance)) {
       completeDirectSuccess(unitId, clampedGoal);
       for (const follower of followers) {
         const followerGoal = clampToWorld(follower.goal);
-        if (isWorldWalkable(followerGoal)) {
+        if (isWorldWalkable(followerGoal, follower.requiredClearance)) {
           completeDirectSuccess(follower.unitId, followerGoal, true);
         } else {
           handlePathFailure(follower.unitId, 'goal-not-walkable', true);
@@ -1093,8 +1204,14 @@ const processNextRequest = () => {
   }
 
   ensureWorker();
-  if (!navState.worker || navState.workerBusy || !navState.workerReady) {
-    // Worker became unavailable; push request back for later processing
+  if (!navState.worker || !navState.workerReady) {
+    const solution = computePathSolution(startCell, goalCell, req.requiredClearance);
+    applySolution(req.unitId, clampedGoal, startCell, solution, req.requiredClearance);
+    deliverFollowers(followers, goalCell, solution);
+    return true;
+  }
+
+  if (navState.workerBusy) {
     requestQueue.unshift(req);
     return false;
   }
@@ -1113,7 +1230,8 @@ const processNextRequest = () => {
     type: 'path',
     id: requestId,
     start: [startCell.cx, startCell.cz],
-    goal: [goalCell.cx, goalCell.cz]
+    goal: [goalCell.cx, goalCell.cz],
+    requiredClearance: req.requiredClearance
   });
 
   return true;
@@ -1324,7 +1442,13 @@ const handleWorkerMessage = (event: MessageEvent<any>) => {
         elapsedMs: data.elapsedMs ?? 0
       };
 
-      applySolution(entry.request.unitId, entry.goal, entry.startCell, solution);
+      applySolution(
+        entry.request.unitId,
+        entry.goal,
+        entry.startCell,
+        solution,
+        entry.request.requiredClearance
+      );
       deliverFollowers(entry.followers, entry.goalCell, solution);
     }
 
@@ -1449,6 +1573,7 @@ export const NavMeshManager = {
     followersByKey.clear();
     navState.maxSearchRadius = 0;
     navState.requiredClearance = 0;
+    navState.minAgentClearance = 0;
     invalidateNavigationCaches();
     updateDiagnostics({
       lastSearchMs: 0,
@@ -1505,9 +1630,11 @@ export const NavMeshManager = {
 
     const unitRadii = Object.values(COLLISION_DATA.UNITS).map(u => u.radius);
     const maxUnitRadius = unitRadii.length ? Math.max(...unitRadii) : 0.5;
+    const minUnitRadius = unitRadii.length ? Math.max(Math.min(...unitRadii), 0.25) : 0.25;
     const adjustedRadius = Math.min(maxUnitRadius, 0.6);
     navState.agentPadding = adjustedRadius;
-    navState.requiredClearance = adjustedRadius + CLEARANCE_MARGIN;
+    navState.requiredClearance = clearanceForRadius(adjustedRadius);
+    navState.minAgentClearance = clearanceForRadius(minUnitRadius);
     navState.flowQueueCx = new Int32Array(width * height);
     navState.flowQueueCz = new Int32Array(width * height);
     navState.flowCostScratch = new Uint32Array(width * height);
@@ -1533,15 +1660,26 @@ export const NavMeshManager = {
     ensurePathGridReady();
   },
 
-  requestPath(unitId: string, startPos: Vector3, endPos: Vector3) {
+  requestPath(unitId: string, startPos: Vector3, endPos: Vector3, agentRadius?: number) {
     if (!navState.ready || pendingRequests.has(unitId)) return;
     ensureWorker();
 
     const start = clampToWorld(startPos);
     const goal = clampToWorld(endPos);
-    const startCell = findNearestWalkableCell(worldToCell(start.x, start.z));
-    const goalCell = findNearestWalkableCell(worldToCell(goal.x, goal.z));
+    const effectiveRadius = Math.max(0.2, Math.min(agentRadius ?? navState.agentPadding ?? 0.5, 1.25));
+    const requiredClearance = clearanceForRadius(effectiveRadius);
+    const startCell = findNearestWalkableCell(worldToCell(start.x, start.z), undefined, requiredClearance);
+    const goalCell = findNearestWalkableCell(worldToCell(goal.x, goal.z), undefined, requiredClearance);
     const key = goalCell ? encodeCell(goalCell) : null;
+
+    if (startCell && goalCell && startCell.cx === goalCell.cx && startCell.cz === goalCell.cz) {
+      if (isWorldWalkable(goal, requiredClearance)) {
+        completeDirectSuccess(unitId, goal);
+      } else {
+        handlePathFailure(unitId, 'goal-not-walkable');
+      }
+      return;
+    }
 
     if (key) {
       const existing = queuedRequestsByKey.get(key);
@@ -1551,7 +1689,8 @@ export const NavMeshManager = {
           start,
           goal,
           startCell,
-          goalCell
+          goalCell,
+          requiredClearance
         };
         const group = followersByKey.get(key);
         if (group) {
@@ -1571,7 +1710,8 @@ export const NavMeshManager = {
       goal,
       startCell,
       goalCell,
-      key
+      key,
+      requiredClearance
     };
 
     requestQueue.push(request);
@@ -1600,6 +1740,10 @@ export const NavMeshManager = {
 
   advanceOnNav(from: Vector3, to: Vector3, maxStep: number) {
     return advanceOnNavInternal(from, to, maxStep);
+  },
+
+  findLocalAdjustment(from: Vector3, goal: Vector3, options?: LocalAdjustmentOptions) {
+    return findLocalAdjustmentInternal(from, goal, options);
   },
 
   sampleFlowDirection(goal: Vector3, position: Vector3) {
@@ -1644,6 +1788,7 @@ export const NavMeshManager = {
     queuedRequestsByKey.clear();
     followersByKey.clear();
     navState.requiredClearance = 0;
+    navState.minAgentClearance = 0;
     navState.worker?.terminate();
     navState.worker = null;
     navState.workerReady = false;

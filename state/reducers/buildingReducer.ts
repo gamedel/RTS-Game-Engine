@@ -26,9 +26,7 @@ export const applyBuildingCollapse = (
         };
     }
 
-    if (originalBuilding.constructionProgress === undefined) {
-        NavMeshManager.removeObstacle(originalBuilding);
-    }
+    NavMeshManager.removeObstacle(originalBuilding);
 
     const updatedUnits = { ...state.units };
     Object.keys(updatedUnits).forEach(unitId => {
@@ -269,6 +267,8 @@ export function buildingReducer(state: GameState, action: Action): GameState {
                 buildings: { ...state.buildings, [newBuildingId]: newBuilding },
                 buildMode: player.isHuman ? null : state.buildMode,
             };
+
+            NavMeshManager.addObstacle(newBuilding);
 
             return newState;
         }

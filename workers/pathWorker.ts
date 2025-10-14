@@ -19,6 +19,7 @@ type PathRequestMessage = {
   id: number;
   start: [number, number];
   goal: [number, number];
+  requiredClearance?: number;
 };
 
 type IncomingMessage = InitMessage | UpdateMessage | PathRequestMessage;

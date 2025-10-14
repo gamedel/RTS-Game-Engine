@@ -2,19 +2,31 @@ import { GameState, UnitStatus, UnitType, Unit, GameObjectType, BuildingType, Bu
 import { UNIT_CONFIG, COLLISION_DATA, DEATH_ANIMATION_DURATION, arePlayersHostile } from '../../constants';
 import { BufferedDispatch } from '../../state/batch';
 import { NavMeshManager } from '../utils/navMeshManager';
-import { Vec2, getDepenetrationVector, getSeparationVector } from '../utils/physics';
 import { SpatialHash } from '../utils/spatial';
 import { driveWorkerBehavior } from './workerBehavior';
 import { AUTO_COMBAT_SQUAD_ID } from './threatSystem';
 
 const buildingGrid = new SpatialHash(10);
 const unitGrid = new SpatialHash(5);
-const buildingNeighbors: string[] = [];
 const unitNeighbors: string[] = [];
 const neighborUnits: Unit[] = [];
-const separationVec: Vec2 = { x: 0, z: 0 };
 const navFrom: Vector3 = { x: 0, y: 0, z: 0 };
 const navTo: Vector3 = { x: 0, y: 0, z: 0 };
+
+const STUCK_SAMPLE_THRESHOLD = 0.045;
+const STUCK_TIME_BEFORE_REPATH = 0.65;
+const STUCK_REPATH_COOLDOWN = 0.75;
+const STUCK_LOCAL_MAX_OFFSET = 4.5;
+
+type PathingState = {
+    lastX: number;
+    lastZ: number;
+    stillTime: number;
+    cooldown: number;
+    lastSeen: number;
+};
+
+const pathingDiagnostics = new Map<string, PathingState>();
 
 const distanceSqXZ = (ax: number, az: number, bx: number, bz: number) => {
     const dx = ax - bx;
@@ -149,29 +161,6 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
     const frameNow = performance.now();
 
     for (const unit of unitList) {
-        // --- Stuck Detection Logic ---
-        if (unit.lastPositionCheck === undefined) {
-            dispatch({
-                type: 'UPDATE_UNIT',
-                payload: { id: unit.id, lastPositionCheck: { pos: unit.position, time: frameNow } }
-            });
-        } else {
-            if (frameNow - unit.lastPositionCheck.time > 500) {
-                const dx = unit.position.x - unit.lastPositionCheck.pos.x;
-                const dz = unit.position.z - unit.lastPositionCheck.pos.z;
-                const movedSq = dx * dx + dz * dz;
-
-                if (unit.status === UnitStatus.MOVING && unit.pathTarget && movedSq < 0.05 * 0.05) {
-                    NavMeshManager.invalidateFlowField(unit.pathTarget);
-                }
-
-                dispatch({
-                    type: 'UPDATE_UNIT',
-                    payload: { id: unit.id, lastPositionCheck: { pos: unit.position, time: frameNow } }
-                });
-            }
-        }
-        
         // --- Death Logic ---
         if (unit.isDying) {
             if (Date.now() - (unit.deathTime || 0) > DEATH_ANIMATION_DURATION) {
@@ -192,6 +181,30 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
         const unitPos = unit.position;
         const unitPosX = unitPos.x;
         const unitPosZ = unitPos.z;
+
+        const diag = pathingDiagnostics.get(unit.id) ?? {
+            lastX: unitPosX,
+            lastZ: unitPosZ,
+            stillTime: 0,
+            cooldown: 0,
+            lastSeen: frameNow,
+        };
+        const moved = Math.hypot(unitPosX - diag.lastX, unitPosZ - diag.lastZ);
+        if (moved < STUCK_SAMPLE_THRESHOLD) {
+            diag.stillTime += delta;
+        } else {
+            diag.stillTime = 0;
+        }
+        diag.lastX = unitPosX;
+        diag.lastZ = unitPosZ;
+        diag.lastSeen = frameNow;
+        if (unit.status !== UnitStatus.MOVING) {
+            diag.stillTime = 0;
+        }
+        if (diag.cooldown > 0) {
+            diag.cooldown = Math.max(0, diag.cooldown - delta);
+        }
+        pathingDiagnostics.set(unit.id, diag);
 
         if (unit.orderQueue && unit.orderQueue.length) {
             const workingOnWorkerJob = unit.unitType === UnitType.WORKER && !!unit.workerOrder;
@@ -260,16 +273,70 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
         }
 
         const pathTarget = unit.pathTarget;
+        const hasPathArray =
+            Array.isArray(unit.path) &&
+            unit.pathIndex !== undefined &&
+            unit.pathIndex < unit.path.length;
+        const currentWaypoint = hasPathArray ? unit.path![unit.pathIndex!] : undefined;
+        const localGoal = currentWaypoint ?? pathTarget;
+
         if (unit.status === UnitStatus.MOVING && pathTarget && !unit.path && unit.pathIndex === undefined && !NavMeshManager.isRequestPending(unit.id)) {
-            NavMeshManager.requestPath(unit.id, unit.position, pathTarget);
+            NavMeshManager.requestPath(unit.id, unit.position, pathTarget, unitRadius);
         }
 
         let handledMovement = false;
 
-        if (unit.path && unit.pathIndex !== undefined && unit.pathIndex < unit.path.length) {
-            const waypoint = unit.path[unit.pathIndex];
-            const WAYPOINT_REACHED_DISTANCE_SQ = 4.0;
-            if (distanceSqXZ(unitPosX, unitPosZ, waypoint.x, waypoint.z) < WAYPOINT_REACHED_DISTANCE_SQ) {
+        const isStuck = diag.stillTime > STUCK_TIME_BEFORE_REPATH;
+        if (
+            unit.status === UnitStatus.MOVING &&
+            localGoal &&
+            isStuck &&
+            diag.cooldown <= 0 &&
+            !NavMeshManager.isRequestPending(unit.id)
+        ) {
+            const detour = NavMeshManager.findLocalAdjustment(unit.position, localGoal, {
+                agentRadius: unitRadius,
+                maxOffset: STUCK_LOCAL_MAX_OFFSET,
+                angularSteps: 4,
+                radialIterations: 4,
+            });
+
+            if (detour && distanceSqXZ(detour.x, detour.z, localGoal.x, localGoal.z) > 0.09) {
+                dispatch({
+                    type: 'UPDATE_UNIT',
+                    payload: {
+                        id: unit.id,
+                        pathTarget: detour,
+                        targetPosition: detour,
+                        path: undefined,
+                        pathIndex: undefined,
+                    },
+                });
+                NavMeshManager.requestPath(unit.id, unit.position, detour, unitRadius);
+                diag.cooldown = STUCK_REPATH_COOLDOWN;
+                diag.stillTime = 0;
+                pathingDiagnostics.set(unit.id, diag);
+                handledMovement = true;
+            } else if (pathTarget) {
+                dispatch({
+                    type: 'UPDATE_UNIT',
+                    payload: {
+                        id: unit.id,
+                        path: undefined,
+                        pathIndex: undefined,
+                    },
+                });
+                NavMeshManager.requestPath(unit.id, unit.position, pathTarget, unitRadius);
+                diag.cooldown = STUCK_REPATH_COOLDOWN;
+                pathingDiagnostics.set(unit.id, diag);
+            }
+        }
+
+        if (hasPathArray && !handledMovement) {
+            const waypoint = currentWaypoint!;
+            const waypointRadius = Math.max(unitRadius + 0.1, 0.6);
+            const waypointRadiusSq = waypointRadius * waypointRadius;
+            if (distanceSqXZ(unitPosX, unitPosZ, waypoint.x, waypoint.z) < waypointRadiusSq) {
                 const newIndex = unit.pathIndex + 1;
                 if (newIndex >= unit.path.length) {
                     dispatch({ type: 'UPDATE_UNIT', payload: { id: unit.id, path: undefined, pathIndex: undefined } });
@@ -281,9 +348,9 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                 navFrom.x = unitPosX;
                 navFrom.y = 0;
                 navFrom.z = unitPosZ;
-                navTo.x = pathTarget.x;
+                navTo.x = waypoint.x;
                 navTo.y = 0;
-                navTo.z = pathTarget.z;
+                navTo.z = waypoint.z;
                 const next = NavMeshManager.advanceOnNav(navFrom, navTo, step);
                 const deltaX = next.x - unitPosX;
                 const deltaZ = next.z - unitPosZ;
@@ -297,14 +364,14 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
         if (!handledMovement && unit.status === UnitStatus.MOVING && pathTarget) {
             let arrivalRadiusSq = 4.0;
             if (unit.interactionAnchor) {
-                const tightRadius = Math.max(unitRadius + 0.25, 0.35);
-                arrivalRadiusSq = Math.max(0.16, tightRadius * tightRadius);
+                const tightRadius = Math.max(unitRadius + 0.12, 0.32);
+                arrivalRadiusSq = Math.max(0.12, tightRadius * tightRadius);
             }
 
             if (unit.unitType === UnitType.WORKER && unit.targetId) {
                 const gatherTarget = resourcesNodes[unit.targetId];
                 if (gatherTarget) {
-                    const anchorTolerance = Math.max(unitRadius + 0.12, 0.35);
+                    const anchorTolerance = Math.max(unitRadius + 0.08, 0.26);
                     const anchorToleranceSq = anchorTolerance * anchorTolerance;
                     arrivalRadiusSq = Math.max(0.16, Math.min(arrivalRadiusSq, anchorToleranceSq));
                 }
@@ -610,67 +677,15 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
         }
 
         // --- Corrective Physics: Depenetration from buildings ---
-        const nearbyBuildingIds = buildingGrid.queryNeighbors(unitPosX, unitPosZ, buildingNeighbors);
-        let totalPushX = 0;
-        let totalPushZ = 0;
-
-        for (const buildingId of nearbyBuildingIds) {
-            const building = buildings[buildingId];
-            if (building) {
-                const pushVector = getDepenetrationVector(unit, building);
-                if (pushVector) {
-                    totalPushX += pushVector.x;
-                    totalPushZ += pushVector.z;
-                }
-            }
-        }
-
-        if (nearbyUnitIds.length > 1) {
-            const neighbors = neighborUnits;
-            neighbors.length = 0;
-            for (const neighborId of nearbyUnitIds) {
-                if (neighborId === unit.id) continue;
-                const neighbor = units[neighborId];
-                if (!neighbor || neighbor.isDying) continue;
-                neighbors[neighbors.length] = neighbor;
-            }
-
-            if (neighbors.length) {
-                const separation = getSeparationVector(unit, neighbors, separationVec);
-                if (separation) {
-                    const sepX = separation.x;
-                    const sepZ = separation.z;
-                    const sepLenSq = sepX * sepX + sepZ * sepZ;
-                    if (sepLenSq > 1e-6) {
-                        const maxPush = unitConfig.speed * delta * 0.6;
-                        const sepLen = Math.sqrt(sepLenSq) || 1;
-                        const scale = Math.min(maxPush, sepLen) / sepLen;
-                        totalPushX += sepX * scale;
-                        totalPushZ += sepZ * scale;
-                    }
-                }
-            }
-        }
-
-        if (totalPushX !== 0 || totalPushZ !== 0) {
-            const projected = NavMeshManager.projectMove(
-                unit.position,
-                {
-                    x: unit.position.x + totalPushX,
-                    y: unit.position.y,
-                    z: unit.position.z + totalPushZ,
-                }
-            );
-
-            dispatch({
-                type: 'UPDATE_UNIT',
-                payload: {
-                    id: unit.id,
-                    position: projected,
-                }
-            });
+        const totalPushX = 0;
+        const totalPushZ = 0;
+    }
+    for (const [id, info] of pathingDiagnostics) {
+        if (frameNow - info.lastSeen > 1500) {
+            pathingDiagnostics.delete(id);
         }
     }
+
 };
 
 

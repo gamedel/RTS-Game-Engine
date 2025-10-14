@@ -4,6 +4,7 @@ import { UNIT_CONFIG, COLLISION_DATA, RESEARCH_CONFIG } from '../../constants';
 import { AUTO_COMBAT_SQUAD_ID } from '../../hooks/gameLogic/threatSystem';
 import { computeBuildingApproachPoint } from '../../hooks/utils/buildingApproach';
 import { computeGatherAssignment } from '../../hooks/utils/gatherSlots';
+import { NavMeshManager } from '../../hooks/utils/navMeshManager';
 
 type CommandTarget = Unit | Building | ResourceNode;
 
@@ -94,6 +95,10 @@ const stripWorkerOrders = (unit: Unit): Unit => {
         ...unit,
         ...cleared,
         finalDestination: undefined,
+        path: undefined,
+        pathIndex: undefined,
+        pathTarget: undefined,
+        targetPosition: undefined,
     };
 };
 
@@ -181,7 +186,16 @@ const resolveWorkerSpecialCommand = (
                 finalDestination: undefined,
             };
         }
-        const { anchor, radius } = computeGatherAssignment(state, worker, resource);
+        const assignment = computeGatherAssignment(state, worker, resource);
+        const workerRadius = COLLISION_DATA.UNITS[worker.unitType]?.radius ?? 0.4;
+        const adjustedAnchorCandidate = NavMeshManager.findLocalAdjustment(worker.position, assignment.anchor, {
+            agentRadius: workerRadius,
+            maxOffset: Math.max(3, workerRadius * 6),
+            angularSteps: 3,
+            radialIterations: 3,
+        });
+        const anchor = adjustedAnchorCandidate ? { x: adjustedAnchorCandidate.x, y: 0, z: adjustedAnchorCandidate.z } : assignment.anchor;
+        const radius = Math.max(assignment.radius, Math.hypot(anchor.x - resource.position.x, anchor.z - resource.position.z));
         const order = createGatherOrder(state, worker, resource, now, anchor, radius);
         return {
             ...worker,
@@ -203,13 +217,22 @@ const resolveWorkerSpecialCommand = (
             gatherTimer: 0,
             path: undefined,
             pathIndex: undefined,
-            targetPosition: undefined,
+            targetPosition: anchor,
         };
     }
 
     if (target.type === GameObjectType.BUILDING && target.playerId === worker.playerId) {
         const building = target as Building;
-        const { approach, radius } = getBuildingApproach(worker, building, targetPosition);
+        const approachData = getBuildingApproach(worker, building, targetPosition);
+        const workerRadius = COLLISION_DATA.UNITS[worker.unitType]?.radius ?? 0.4;
+        const adjustedApproachCandidate = NavMeshManager.findLocalAdjustment(worker.position, approachData.approach, {
+            agentRadius: workerRadius,
+            maxOffset: Math.max(3, workerRadius * 6),
+            angularSteps: 3,
+            radialIterations: 3,
+        });
+        const approach = adjustedApproachCandidate ? { x: adjustedApproachCandidate.x, y: 0, z: adjustedApproachCandidate.z } : approachData.approach;
+        const radius = Math.max(approachData.radius, Math.hypot(approach.x - building.position.x, approach.z - building.position.z));
 
         if (building.constructionProgress !== undefined && building.constructionProgress < 1) {
             const order = createBuildOrder(building, approach, radius, now);
@@ -233,7 +256,7 @@ const resolveWorkerSpecialCommand = (
                 gatherTimer: undefined,
                 path: undefined,
                 pathIndex: undefined,
-                targetPosition: undefined,
+                targetPosition: approach,
             };
         }
 
@@ -259,7 +282,7 @@ const resolveWorkerSpecialCommand = (
                 gatherTimer: undefined,
                 path: undefined,
                 pathIndex: undefined,
-                targetPosition: undefined,
+                targetPosition: approach,
             };
         }
 
