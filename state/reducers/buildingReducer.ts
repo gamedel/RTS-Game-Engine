@@ -4,6 +4,7 @@ import { GameState, Action, Building, GameObjectType, UnitType, UnitStatus, Buil
 import { BUILDING_CONFIG, UNIT_CONFIG, TOWER_UPGRADE_CONFIG, COLLISION_DATA } from '../../constants';
 import { NavMeshManager } from '../../hooks/utils/navMeshManager';
 import { computeBuildingApproachPoint } from '../../hooks/utils/buildingApproach';
+import { collectEjectionPatches } from '../utils/spawn';
 
 export const applyBuildingCollapse = (
     state: GameState,
@@ -96,7 +97,6 @@ export const applyBuildingCollapse = (
 
     return nextState;
 };
-
 
 export function buildingReducer(state: GameState, action: Action): GameState {
     switch (action.type) {
@@ -362,10 +362,11 @@ export function buildingReducer(state: GameState, action: Action): GameState {
 
             if (newProgress >= 1) {
                 const finalBuilding = { ...building, hp: building.maxHp, constructionProgress: undefined };
-                
+
                 // Add navmesh obstacle for the completed building
                 NavMeshManager.addObstacle(finalBuilding);
-                
+
+                const buildingsAfterCompletion = { ...state.buildings, [buildingId]: finalBuilding };
                 let nextState: GameState = { ...state };
 
                 if (finalBuilding.buildingType === BuildingType.HOUSE) {
@@ -376,9 +377,9 @@ export function buildingReducer(state: GameState, action: Action): GameState {
                     newPlayers[playerId] = {
                         ...player,
                         population: {
-                           ...player.population,
-                           cap: newCap
-                        }
+                            ...player.population,
+                            cap: newCap,
+                        },
                     };
                     nextState.players = newPlayers;
                 }
@@ -389,11 +390,18 @@ export function buildingReducer(state: GameState, action: Action): GameState {
                         updatedUnits[u.id] = { ...u, status: UnitStatus.IDLE, buildTask: undefined, buildTimer: undefined };
                     }
                 });
-                
-                nextState.buildings = { ...state.buildings, [buildingId]: finalBuilding };
+
+                const ejectionPatches = collectEjectionPatches(updatedUnits, buildingsAfterCompletion, finalBuilding);
+                ejectionPatches.forEach(patch => {
+                    const existing = updatedUnits[patch.id];
+                    if (existing) {
+                        updatedUnits[patch.id] = { ...existing, ...patch };
+                    }
+                });
+
+                nextState.buildings = buildingsAfterCompletion;
                 nextState.units = updatedUnits;
                 return nextState;
-
             } else {
                 const newHp = Math.max(1, Math.floor(newProgress * building.maxHp));
                 const updatedBuilding = { ...building, constructionProgress: newProgress, hp: newHp };
@@ -480,6 +488,9 @@ export function buildingReducer(state: GameState, action: Action): GameState {
             }
 
             const newQueue = building.trainingQueue.slice(1);
+            if (newQueue.length > 0) {
+                newQueue[0] = { ...newQueue[0], progress: 0 };
+            }
 
             return {
                 ...state,

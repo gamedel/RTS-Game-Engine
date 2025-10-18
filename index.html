@@ -240,6 +240,8 @@
             attempted: new Set(),
             metadataAttempts: new Set(),
             metadataPromise: null,
+            currentObjectUrl: null,
+            bundleBase: null,
           };
 
           entryScript.__rtsLoaderState = state;
@@ -308,7 +310,40 @@
           return state.metadataPromise;
         };
 
-        const nextAttempt = (state) => {
+        const applyScriptSource = (state, sourceText, originalUrl) => {
+          if (state.currentObjectUrl) {
+            URL.revokeObjectURL(state.currentObjectUrl);
+            state.currentObjectUrl = null;
+          }
+
+          const lastSlashIndex = originalUrl.lastIndexOf('/');
+          const baseUrl = lastSlashIndex >= 0 ? originalUrl.slice(0, lastSlashIndex + 1) : originalUrl;
+          state.bundleBase = baseUrl;
+          try {
+            window.__rtsBundleBaseUrl = baseUrl;
+          } catch {
+            // ignore if window is not defined
+          }
+
+          try {
+            (globalThis).__rtsBundleBaseUrl = baseUrl;
+          } catch {
+            // ignore if globalThis is not writable
+          }
+
+          entryScript.dataset.sourceUrl = originalUrl;
+          entryScript.type = 'module';
+
+          if (sourceText && sourceText.length > 0) {
+            const prologue = `globalThis.__rtsBundleBaseUrl = ${JSON.stringify(baseUrl)};\n`;
+            const blob = new Blob([prologue, sourceText, `\n//# sourceURL=${originalUrl}`], { type: 'application/javascript' });
+            const objectUrl = URL.createObjectURL(blob);
+            state.currentObjectUrl = objectUrl;
+            entryScript.src = objectUrl;
+          }
+        };
+
+        const nextAttempt = async (state) => {
           if (!state.assetPath) {
             return false;
           }
@@ -326,11 +361,12 @@
 
             state.attempted.add(candidateUrl);
 
-            if (entryScript.src === candidateUrl || entryScript.getAttribute('src') === candidateUrl) {
+            if (entryScript.dataset.sourceUrl === candidateUrl) {
               continue;
             }
 
-            boot?.show?.('Loading game files…');
+            boot?.show?.('Loading game files...');
+            applyScriptSource(state, '', candidateUrl);
             entryScript.src = candidateUrl;
             return true;
           }
@@ -351,17 +387,30 @@
             }
           }
 
-          if (!nextAttempt(state)) {
+          if (!(await nextAttempt(state))) {
             boot?.error?.('Failed to load game files. Please refresh the page.');
           }
         };
 
-        entryScript.addEventListener('error', (event) => {
+        entryScript.addEventListener('error', async (event) => {
           const state = ensureState();
           console.error('Failed to load app entry script', entryScript.src, event);
 
-          if (!nextAttempt(state)) {
+          if (state.currentObjectUrl) {
+            URL.revokeObjectURL(state.currentObjectUrl);
+            state.currentObjectUrl = null;
+          }
+
+          if (!(await nextAttempt(state))) {
             boot?.error?.('Failed to load game files. Please refresh the page.');
+          }
+        });
+
+        entryScript.addEventListener('load', () => {
+          const state = ensureState();
+          if (state.currentObjectUrl) {
+            URL.revokeObjectURL(state.currentObjectUrl);
+            state.currentObjectUrl = null;
           }
         });
 

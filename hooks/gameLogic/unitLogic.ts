@@ -5,6 +5,7 @@ import { NavMeshManager } from '../utils/navMeshManager';
 import { SpatialHash } from '../utils/spatial';
 import { driveWorkerBehavior } from './workerBehavior';
 import { AUTO_COMBAT_SQUAD_ID } from './threatSystem';
+import { findContainingBuilding, findEjectionPosition } from '../../state/utils/spawn';
 
 const buildingGrid = new SpatialHash(10);
 const unitGrid = new SpatialHash(5);
@@ -17,6 +18,7 @@ const STUCK_SAMPLE_THRESHOLD = 0.045;
 const STUCK_TIME_BEFORE_REPATH = 0.65;
 const STUCK_REPATH_COOLDOWN = 0.75;
 const STUCK_LOCAL_MAX_OFFSET = 4.5;
+const STUCK_FORCE_RELOCATE = 5.0;
 
 type PathingState = {
     lastX: number;
@@ -329,6 +331,60 @@ export const processUnitLogic = (state: GameState, delta: number, dispatch: Buff
                 NavMeshManager.requestPath(unit.id, unit.position, pathTarget, unitRadius);
                 diag.cooldown = STUCK_REPATH_COOLDOWN;
                 pathingDiagnostics.set(unit.id, diag);
+            }
+        }
+
+        if (
+            unit.status === UnitStatus.MOVING &&
+            !handledMovement &&
+            diag.stillTime > STUCK_FORCE_RELOCATE
+        ) {
+            const containingBuilding = findContainingBuilding(state.buildings, unit.position, unitRadius * 0.75);
+            if (containingBuilding) {
+                const exitPosition = findEjectionPosition(state.units, state.buildings, containingBuilding, unit);
+                dispatch({
+                    type: 'UPDATE_UNIT',
+                    payload: {
+                        id: unit.id,
+                        position: exitPosition,
+                        path: undefined,
+                        pathIndex: undefined,
+                        pathTarget: undefined,
+                        targetPosition: undefined,
+                        finalDestination: unit.finalDestination,
+                    },
+                });
+                diag.stillTime = 0;
+                diag.cooldown = STUCK_REPATH_COOLDOWN;
+                pathingDiagnostics.set(unit.id, diag);
+                continue;
+            }
+
+            const targetHint =
+                unit.finalDestination ??
+                unit.pathTarget ??
+                unit.guardPosition ??
+                unit.position;
+            const safeSnap = NavMeshManager.safeSnap(targetHint, Math.max(6, unitRadius * 6));
+            if (safeSnap) {
+                const snapDistSq = distanceSqXZ(safeSnap.x, safeSnap.z, unitPosX, unitPosZ);
+                if (snapDistSq > Math.max(0.64, unitRadius * unitRadius * 4)) {
+                    dispatch({
+                        type: 'UPDATE_UNIT',
+                        payload: {
+                            id: unit.id,
+                            position: { x: safeSnap.x, y: unit.position.y, z: safeSnap.z },
+                            path: undefined,
+                            pathIndex: undefined,
+                            pathTarget: undefined,
+                            targetPosition: undefined,
+                        },
+                    });
+                    diag.stillTime = 0;
+                    diag.cooldown = STUCK_REPATH_COOLDOWN;
+                    pathingDiagnostics.set(unit.id, diag);
+                    continue;
+                }
             }
         }
 

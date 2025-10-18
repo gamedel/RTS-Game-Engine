@@ -243,19 +243,9 @@ export const processCombatLogic = (state: GameState, delta: number, dispatch: Bu
         const guardPosition = unit.guardPosition ?? unit.position;
         const guardReturnRadius = unit.guardReturnRadius ?? behavior.guardDistance;
         const guardReturnRadiusSq = guardReturnRadius * guardReturnRadius;
-        let pursuitDistance = unit.guardPursuitRadius ?? behavior.pursuitDistance;
-        if (unit.currentOrder?.type === UnitOrderType.HOLD_POSITION) {
-            pursuitDistance = Math.min(
-                pursuitDistance,
-                Math.max(preferredDistance, unit.attackRange + attackerRadius + targetRadius * 0.5),
-            );
-        } else if (unit.currentOrder?.type === UnitOrderType.ATTACK_MOVE || unit.patrolRoute) {
-            pursuitDistance = Math.max(
-                pursuitDistance,
-                unit.attackRange + attackerRadius + targetRadius + 6,
-            );
-        }
-        const pursuitDistanceSq = pursuitDistance * pursuitDistance;
+        const basePursuitDistance = unit.guardPursuitRadius ?? behavior.pursuitDistance;
+        let pursuitDistance = basePursuitDistance;
+        let pursuitDistanceSq = pursuitDistance * pursuitDistance;
 
         const distFromGuardSq = distanceSqXZ(unit.position, guardPosition);
 
@@ -438,6 +428,22 @@ export const processCombatLogic = (state: GameState, delta: number, dispatch: Bu
                 inRange = false;
             }
         }
+
+        // Re-evaluate pursuit distance once range data is available.
+        if (unit.currentOrder?.type === UnitOrderType.HOLD_POSITION) {
+            pursuitDistance = Math.min(
+                basePursuitDistance,
+                Math.max(preferredDistance, unit.attackRange + attackerRadius + targetRadius * 0.5),
+            );
+        } else if (unit.currentOrder?.type === UnitOrderType.ATTACK_MOVE || unit.patrolRoute) {
+            pursuitDistance = Math.max(
+                basePursuitDistance,
+                unit.attackRange + attackerRadius + targetRadius + 6,
+            );
+        } else {
+            pursuitDistance = basePursuitDistance;
+        }
+        pursuitDistanceSq = pursuitDistance * pursuitDistance;
 
         const guardToTargetSq = distanceSqXZ(guardPosition, targetPosition);
         if (guardToTargetSq > pursuitDistanceSq && unit.stance !== UnitStance.HOLD_GROUND) {

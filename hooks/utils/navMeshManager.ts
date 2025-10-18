@@ -76,6 +76,7 @@ type NavState = {
   workerBusy: boolean;
   workerCounter: number;
   workerPending: Map<number, WorkerRequestEntry>;
+  workerFailed: boolean;
 };
 
 const WORLD_SIZE = 320;
@@ -136,7 +137,8 @@ const navState: NavState = {
   workerReady: false,
   workerBusy: false,
   workerCounter: 0,
-  workerPending: new Map<number, WorkerRequestEntry>()
+  workerPending: new Map<number, WorkerRequestEntry>(),
+  workerFailed: false
 };
 
 const requestQueue: PathRequest[] = [];
@@ -1458,12 +1460,60 @@ const handleWorkerMessage = (event: MessageEvent<any>) => {
 
 const ensureWorker = () => {
   if (typeof window === 'undefined' || typeof Worker === 'undefined') return;
-  if (navState.worker) return;
+  if (navState.worker || navState.workerFailed) return;
+
+  const urlCandidates = [
+    '../../workers/pathWorker.ts',
+    '../../workers/pathWorker.js',
+    './workers/pathWorker.ts',
+    './workers/pathWorker.js',
+    'workers/pathWorker.ts',
+    'workers/pathWorker.js'
+  ];
+
+  const tryResolve = (candidate: string, base?: string | URL): string | undefined => {
+    try {
+      const resolved = base ? new URL(candidate, base) : new URL(candidate, import.meta.url);
+      return resolved.toString();
+    } catch {
+      return undefined;
+    }
+  };
+
+  const resolveWorkerUrl = (): string | undefined => {
+    for (const candidate of urlCandidates) {
+      const direct = tryResolve(candidate);
+      if (direct) return direct;
+    }
+
+    const bundleBase = (window as any)?.__rtsBundleBaseUrl as string | undefined;
+    if (bundleBase) {
+      for (const candidate of urlCandidates) {
+        const normalized = candidate.replace(/^(\.\.\/)+/, '');
+        const viaBase = tryResolve(normalized, bundleBase);
+        if (viaBase) return viaBase;
+      }
+    }
+
+    const origin = window?.location?.origin;
+    if (origin) {
+      for (const candidate of urlCandidates) {
+        const normalized = candidate.replace(/^(\.\.\/)+/, '');
+        const viaOrigin = tryResolve(normalized, origin + '/');
+        if (viaOrigin) return viaOrigin;
+      }
+    }
+
+    return undefined;
+  };
 
   try {
-    const worker = new Worker(new URL('../../workers/pathWorker.ts', import.meta.url), {
-      type: 'module'
-    });
+    const workerUrl = resolveWorkerUrl();
+    if (!workerUrl) {
+      throw new Error('Unable to resolve navmesh worker url');
+    }
+
+    const worker = new Worker(workerUrl, { type: 'module' });
     worker.onmessage = handleWorkerMessage;
     worker.onerror = event => {
       console.error('[NavMeshWorker] error', event);
@@ -1474,6 +1524,7 @@ const ensureWorker = () => {
     navState.workerBusy = false;
     navState.workerCounter = 0;
     navState.workerPending.clear();
+    navState.workerFailed = false;
 
     if (navState.grid && navState.matrix) {
       sendWorkerInit();
@@ -1482,6 +1533,10 @@ const ensureWorker = () => {
     console.error('[NavMeshWorker] failed to create worker', error);
     navState.worker = null;
     navState.workerReady = false;
+    navState.workerBusy = false;
+    navState.workerCounter = 0;
+    navState.workerPending.clear();
+    navState.workerFailed = true;
   }
 };
 
@@ -1795,6 +1850,7 @@ export const NavMeshManager = {
     navState.workerBusy = false;
     navState.workerCounter = 0;
     navState.workerPending.clear();
+    navState.workerFailed = false;
     invalidateNavigationCaches();
     updateDiagnostics({
       lastSearchMs: 0,

@@ -271,6 +271,40 @@ const processSingleAiLogic = (
     }
 
 
+    // --- AUTO ENGAGE NEARBY ENEMIES ---
+    const AUTO_ENGAGE_RADIUS_SQ = 18 * 18;
+    const engageableCombatants = myUnits.filter(u =>
+        u.unitType !== UnitType.WORKER &&
+        !u.isDying &&
+        u.hp > 0 &&
+        u.status !== UnitStatus.FLEEING
+    );
+    let autoEngageIssued = 0;
+    for (const unit of engageableCombatants) {
+        if (autoEngageIssued >= 8) break;
+        if (unit.status !== UnitStatus.IDLE && unit.status !== UnitStatus.MOVING) continue;
+        const threat = findClosestTarget(unit.position, hostileMilitary);
+        if (!threat) continue;
+        const dx = unit.position.x - threat.position.x;
+        const dz = unit.position.z - threat.position.z;
+        if (dx * dx + dz * dz > AUTO_ENGAGE_RADIUS_SQ) continue;
+        if (unit.targetId === threat.id || unit.currentOrder?.targetId === threat.id) continue;
+
+        dispatch({
+            type: 'COMMAND_UNIT',
+            payload: {
+                unitId: unit.id,
+                orderType: UnitOrderType.ATTACK_TARGET,
+                targetId: threat.id,
+                targetPosition: threat.position,
+                finalDestination: threat.position,
+                source: 'ai',
+            },
+        });
+        autoEngageIssued++;
+    }
+
+
     // --- TACTICAL RETREAT ---
     // This should run regardless of attack state, if a wave is active.
     if (aiState.currentAttackWave.length > 0 && myTownHall) {
@@ -583,7 +617,25 @@ const processSingleAiLogic = (
                     if (unitType === UnitType.WORKER) {
                         trainingBuilding = myTownHall;
                     } else {
-                        trainingBuilding = myBuildings.find(b => b.buildingType === BuildingType.BARRACKS && b.constructionProgress === undefined);
+                        const availableBarracks = myBuildings.filter(
+                            b => b.buildingType === BuildingType.BARRACKS &&
+                                b.constructionProgress === undefined &&
+                                b.trainingQueue.length < 5
+                        );
+                        if (availableBarracks.length > 0) {
+                            trainingBuilding = availableBarracks.reduce<Building | undefined>((best, current) => {
+                                if (!best) return current;
+                                const bestQueue = best.trainingQueue.length;
+                                const currentQueue = current.trainingQueue.length;
+                                if (currentQueue < bestQueue) return current;
+                                if (currentQueue > bestQueue) return best;
+                                const bestProgress = best.trainingQueue[0]?.progress ?? 0;
+                                const currentProgress = current.trainingQueue[0]?.progress ?? 0;
+                                if (currentProgress < bestProgress) return current;
+                                if (currentProgress > bestProgress) return best;
+                                return Math.random() < 0.5 ? current : best;
+                            }, undefined);
+                        }
                     }
 
                     if (trainingBuilding && trainingBuilding.trainingQueue.length < 5) {
@@ -729,7 +781,7 @@ const processSingleAiLogic = (
                             type: 'COMMAND_UNIT',
                             payload: {
                                 unitId: unit.id,
-                                orderType: UnitOrderType.MOVE,
+                                orderType: UnitOrderType.ATTACK_MOVE,
                                 targetPosition: destination,
                                 finalDestination: destination,
                                 source: 'ai',

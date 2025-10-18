@@ -240,6 +240,21 @@ function AppContent() {
 
   const initialCameraPos: [number, number, number] = [0, 60, 70];
 
+  useEffect(() => {
+    if (gamePhase !== 'playing') {
+      return;
+    }
+
+    const preventContextMenu = (event: Event) => {
+      event.preventDefault();
+    };
+
+    document.addEventListener('contextmenu', preventContextMenu, true);
+    return () => {
+      document.removeEventListener('contextmenu', preventContextMenu, true);
+    };
+  }, [gamePhase]);
+
   return (
     <div className="w-screen h-screen flex flex-col bg-black text-white font-sans">
       {gamePhase === 'menu' && <MainMenu onStartGame={handleStartGame} />}

@@ -5,6 +5,7 @@ import { AUTO_COMBAT_SQUAD_ID } from '../../hooks/gameLogic/threatSystem';
 import { computeBuildingApproachPoint } from '../../hooks/utils/buildingApproach';
 import { computeGatherAssignment } from '../../hooks/utils/gatherSlots';
 import { NavMeshManager } from '../../hooks/utils/navMeshManager';
+import { computeSpawnPosition, computeRadialMoveOutPosition } from '../utils/spawn';
 
 type CommandTarget = Unit | Building | ResourceNode;
 
@@ -341,6 +342,12 @@ export function unitReducer(state: GameState, action: Action): GameState {
             if (!unit) return state;
             const behaviorConfig = UNIT_CONFIG[unit.unitType] as any;
             const commandSource: UnitCommandSource = source ?? 'player';
+            const owner = state.players[unit.playerId];
+
+            if (commandSource === 'ai' && owner?.isHuman) {
+                return state;
+            }
+
             const isAutoCommand = squadId === AUTO_COMBAT_SQUAD_ID || commandSource === 'auto';
 
             let targetObject: CommandTarget | null = null;
@@ -829,16 +836,7 @@ export function unitReducer(state: GameState, action: Action): GameState {
             const isCombatUnit = unitType !== UnitType.WORKER;
             const newUnitId = uuidv4();
 
-            const buildingSize = COLLISION_DATA.BUILDINGS[building.buildingType];
-            const unitRadius = COLLISION_DATA.UNITS[unitType].radius;
-            const spawnZOffset = (buildingSize.depth / 2) + unitRadius + 1.0;
-            const spawnXRange = Math.max(0, buildingSize.width / 2 - unitRadius);
-
-            const spawnPosition = {
-                x: building.position.x + (Math.random() - 0.5) * spawnXRange,
-                y: 0,
-                z: building.position.z + spawnZOffset,
-            };
+            const spawnPosition = computeSpawnPosition(state, building, unitType);
             const spawnGuardReturn = config.guardDistance ?? Math.max(config.attackRange + 2, 4);
             const spawnGuardPursuit = config.pursuitDistance ?? (spawnGuardReturn + 6);
 
@@ -872,12 +870,14 @@ export function unitReducer(state: GameState, action: Action): GameState {
                 }
                 completeUnit.guardPosition = { ...building.rallyPoint };
             } else {
-                // No rally point, give a small move-out command to clear the spawn area
+                const moveOutOffset = 2 + Math.random() * 1.75;
+                const moveOutPosition = computeRadialMoveOutPosition(building, spawnPosition, moveOutOffset);
                 completeUnit.status = UnitStatus.MOVING;
-                const moveOutPosition = { ...spawnPosition, z: spawnPosition.z + 3 };
                 completeUnit.pathTarget = moveOutPosition;
+                completeUnit.finalDestination = moveOutPosition;
+                completeUnit.guardPosition = moveOutPosition;
             }
-            
+
             const player = state.players[playerId];
             const population = player.population;
             const updatedPopulation = { ...population, current: population.current + 1 };
